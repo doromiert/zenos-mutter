@@ -1,0 +1,18 @@
+--- a/clutter/clutter/clutter-paint-context.c
++++ b/clutter/clutter/clutter-paint-context.c
+@@ -297,7 +297,14 @@
+ }
+ 
+ /**
+- * clutter_paint_context_get_target_color_state: (skip)
++ * clutter_paint_context_get_target_color_state:
++ * @paint_context: the paint context
++ *
++ * Returns the encoding currently used by the paint target. Effects that retain
++ * child pixels in an offscreen buffer must preserve this state, rather than
++ * tone mapping HDR children to their parent actor's SDR color state.
++ *
++ * Returns: (transfer none): the current target color state
+  */
+ ClutterColorState *
+ clutter_paint_context_get_target_color_state (ClutterPaintContext *paint_context)

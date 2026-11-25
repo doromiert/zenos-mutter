@@ -40,3 +40,17 @@ Verified locally with Mutter 50.4, GLib 2.88.3, and native AMD render nodes:
 all seven color-state-transform cases pass, including actual HDR buffer/output
 pixel equality with correction enabled and disabled. Personal display settings
 and the interactive comparison GUI are intentionally outside this source repo.
+
+## Offscreen effects and HDR
+
+`paint-target-introspection.patch` exposes the existing paint-context target
+color state to GJS with borrowed ownership. It changes API metadata only.
+An SDR window actor can contain HDR subsurfaces: effects must retain the current
+paint target encoding, not first flatten children into the actor's SDR space.
+Rounded Window Corners Native uses this getter to avoid window-state-dependent
+tone mapping, and chooses FP16 intermediates for HDR/linear paint targets.
+
+The native rounded-corners fixture on GNOME Shell/Mutter50.4 reproduces the
+old darkening (PQ gray148 becomes137 only while rounded); the corrected path
+keeps gray bands identical when rounded, maximized and restored. This does not
+establish appearance on every physical monitor.
