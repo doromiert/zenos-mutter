@@ -1,0 +1,369 @@
+diff --git a/clutter/clutter/clutter-color-state-params.c b/clutter/clutter/clutter-color-state-params.c
+index b603344..781bcfa 100644
+--- a/clutter/clutter/clutter-color-state-params.c
++++ b/clutter/clutter/clutter-color-state-params.c
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include "config.h"
++#include <math.h>
+ 
+ #include "clutter/clutter-color-state-params.h"
+ 
+@@ -58,6 +59,8 @@ typedef struct _ClutterColorStateParams
+   ClutterColorimetry colorimetry;
+   ClutterEOTF eotf;
+   ClutterLuminance luminance;
++  float sdr_gamma;
++  float sdr_saturation;
+ } ClutterColorStateParams;
+ 
+ G_DEFINE_TYPE (ClutterColorStateParams,
+@@ -596,6 +599,35 @@ needs_lum_mapping (const ClutterLuminance *lum,
+                           0.1f);
+ }
+ 
++/* HDR blending buffers use a gamma transfer function too. Mastering headroom,
++ * not the transfer-function name, distinguishes them from SDR source content. */
++static gboolean
++needs_sdr_correction (ClutterColorStateParams *source,
++                      ClutterColorStateParams *target)
++{
++  ClutterColorimetry srgb = { .type = CLUTTER_COLORIMETRY_TYPE_COLORSPACE,
++                             .colorspace = CLUTTER_COLORSPACE_SRGB };
++  const ClutterLuminance *lum = clutter_color_state_params_get_luminance (source);
++
++  return (target->sdr_gamma != 1.0f || target->sdr_saturation != 1.0f) &&
++         !(source->eotf.type == CLUTTER_EOTF_TYPE_NAMED &&
++           source->eotf.tf_name == CLUTTER_TRANSFER_FUNCTION_PQ) &&
++         lum->mastering_max <= lum->ref * 1.01f &&
++         colorimetry_equal (&source->colorimetry, &srgb);
++}
++
++static const ClutterColorOpSnippet sdr_correction = {
++  .name = "sdr_correction",
++  .source =
++    "uniform float sdr_gamma;\n"
++    "uniform float sdr_saturation;\n"
++    "vec3 sdr_correction (vec3 color) {\n"
++    "  color = pow (max (color, vec3 (0.0)), vec3 (sdr_gamma));\n"
++    "  float peak = max (max (color.r, color.g), color.b);\n"
++    "  return clamp (mix (vec3 (peak), color, sdr_saturation), 0.0, 1.0);\n"
++    "}\n",
++};
++
+ static void
+ clutter_color_state_params_init_color_transform_key (ClutterColorState               *color_state,
+                                                      ClutterColorState               *target_color_state,
+@@ -620,6 +652,7 @@ clutter_color_state_params_init_color_transform_key (ClutterColorState
+                        &target_color_state_params->colorimetry) ? 0 : 1;
+   key->tone_mapping_bit = needs_tone_mapping (lum, target_lum) ? 1 : 0;
+   key->lut_3d = 0;
++  key->sdr_correction_bit = needs_sdr_correction (color_state_params, target_color_state_params);
+   key->opaque_bit = !!(flags & CLUTTER_COLOR_STATE_TRANSFORM_OPAQUE);
+ }
+ 
+@@ -1134,6 +1167,8 @@ clutter_color_state_params_append_transform_snippet (ClutterColorState *color_st
+    *     color = inv_eotf (color)
+    *
+    */
++  if (needs_sdr_correction (color_state_params, target_color_state_params))
++    clutter_color_op_snippet_append_global (&sdr_correction, snippet_globals);
+   clutter_color_op_snippet_append_global (eotf_snippet, snippet_globals);
+   clutter_color_op_snippet_append_global (inv_eotf_snippet, snippet_globals);
+   clutter_color_op_snippet_append_global (luminance_mapping_snippet, snippet_globals);
+@@ -1158,6 +1193,9 @@ clutter_color_state_params_append_transform_snippet (ClutterColorState *color_st
+                                           snippet_globals,
+                                           snippet_color_var);
+ 
++  if (needs_sdr_correction (color_state_params, target_color_state_params))
++    clutter_color_op_snippet_append_source (&sdr_correction, snippet_globals, snippet_color_var);
++
+   clutter_color_op_snippet_append_source (luminance_mapping_snippet,
+                                           snippet_globals,
+                                           snippet_color_var);
+@@ -1809,6 +1847,14 @@ clutter_color_state_params_update_uniforms (ClutterColorState *color_state,
+   ClutterColorStateParams *target_color_state_params =
+     CLUTTER_COLOR_STATE_PARAMS (target_color_state);
+ 
++  if (needs_sdr_correction (color_state_params, target_color_state_params))
++    {
++      int gamma_location = cogl_pipeline_get_uniform_location (pipeline, "sdr_gamma");
++      int saturation_location = cogl_pipeline_get_uniform_location (pipeline, "sdr_saturation");
++      cogl_pipeline_set_uniform_1f (pipeline, gamma_location, target_color_state_params->sdr_gamma);
++      cogl_pipeline_set_uniform_1f (pipeline, saturation_location, target_color_state_params->sdr_saturation);
++    }
++
+   update_eotfs_uniforms (color_state_params,
+                          target_color_state_params,
+                          pipeline);
+@@ -2028,6 +2074,37 @@ clutter_color_state_params_do_transform_from_XYZ (ClutterColorState *color_state
+  *
+  * Applies the tone mapping to the given #ClutterColorState
+  */
++static void
++apply_sdr_correction_xyz (ClutterColorStateParams *source,
++                          ClutterColorStateParams *target,
++                          float *data, int n_samples)
++{
++  graphene_matrix_t from_xyz, to_xyz;
++  int i, channel;
++
++  clutter_color_state_params_get_from_XYZ (source, &from_xyz);
++  clutter_color_state_params_get_to_XYZ (source, &to_xyz);
++  for (i = 0; i < n_samples; i++)
++    {
++      graphene_vec4_t v;
++      float rgb[4] = { data[0], data[1], data[2], 1.0f };
++      float peak;
++      graphene_vec4_init_from_float (&v, rgb);
++      graphene_matrix_transform_vec4 (&from_xyz, &v, &v);
++      graphene_vec4_to_float (&v, rgb);
++      for (channel = 0; channel < 3; channel++)
++        rgb[channel] = powf (MAX (rgb[channel], 0.0f), target->sdr_gamma);
++      peak = MAX (MAX (rgb[0], rgb[1]), rgb[2]);
++      for (channel = 0; channel < 3; channel++)
++        rgb[channel] = CLAMP (peak + (rgb[channel] - peak) * target->sdr_saturation, 0.0f, 1.0f);
++      graphene_vec4_init_from_float (&v, rgb);
++      graphene_matrix_transform_vec4 (&to_xyz, &v, &v);
++      graphene_vec4_to_float (&v, rgb);
++      for (channel = 0; channel < 3; channel++) data[channel] = rgb[channel];
++      data += 3;
++    }
++}
++
+ void
+ clutter_color_state_params_do_tone_mapping (ClutterColorState *color_state,
+                                             ClutterColorState *other_color_state,
+@@ -2058,6 +2135,14 @@ clutter_color_state_params_do_tone_mapping (ClutterColorState *color_state,
+       dst_lum = &sdr_default_luminance;
+     }
+ 
++  if (CLUTTER_IS_COLOR_STATE_PARAMS (color_state) &&
++      CLUTTER_IS_COLOR_STATE_PARAMS (other_color_state) &&
++      needs_sdr_correction (CLUTTER_COLOR_STATE_PARAMS (color_state),
++                            CLUTTER_COLOR_STATE_PARAMS (other_color_state)))
++    apply_sdr_correction_xyz (CLUTTER_COLOR_STATE_PARAMS (color_state),
++                              CLUTTER_COLOR_STATE_PARAMS (other_color_state),
++                              data, n_samples);
++
+   if (needs_tone_mapping (src_lum, dst_lum))
+     {
+       clutter_luminance_apply_tone_mapping (src_lum,
+@@ -2093,7 +2178,9 @@ clutter_color_state_params_equals (ClutterColorState *color_state,
+   target_lum =
+     clutter_color_state_params_get_luminance (other_color_state_params);
+ 
+-  return luminances_equal (lum, target_lum);
++  return luminances_equal (lum, target_lum) &&
++         color_state_params->sdr_gamma == other_color_state_params->sdr_gamma &&
++         color_state_params->sdr_saturation == other_color_state_params->sdr_saturation;
+ }
+ 
+ static gboolean
+@@ -2115,7 +2202,8 @@ clutter_color_state_params_needs_mapping (ClutterColorState *color_state,
+   target_lum =
+     clutter_color_state_params_get_luminance (target_color_state_params);
+ 
+-  return needs_tone_mapping (lum, target_lum) ||
++  return needs_sdr_correction (color_state_params, target_color_state_params) ||
++         needs_tone_mapping (lum, target_lum) ||
+          needs_lum_mapping (lum, target_lum);
+ }
+ 
+@@ -2233,10 +2321,15 @@ clutter_color_state_params_get_blending (ClutterColorState *color_state,
+ 
+   g_object_get (G_OBJECT (color_state), "context", &context, NULL);
+ 
+-  return clutter_color_state_params_new_from_primitives (context,
+-                                                         blending_colorimetry,
+-                                                         blending_eotf,
+-                                                         blending_luminance);
++  ClutterColorState *blending_state =
++    clutter_color_state_params_new_from_primitives (context,
++                                                    blending_colorimetry,
++                                                    blending_eotf,
++                                                    blending_luminance);
++  clutter_color_state_params_set_sdr_correction (blending_state,
++                                                 color_state_params->sdr_gamma,
++                                                 color_state_params->sdr_saturation);
++  return blending_state;
+ }
+ 
+ static void
+@@ -2262,6 +2355,8 @@ clutter_color_state_params_class_init (ClutterColorStateParamsClass *klass)
+ static void
+ clutter_color_state_params_init (ClutterColorStateParams *color_state_params)
+ {
++  color_state_params->sdr_gamma = 1.0f;
++  color_state_params->sdr_saturation = 1.0f;
+ }
+ 
+ /**
+@@ -2538,3 +2633,16 @@ clutter_color_state_params_new_from_cicp (ClutterContext     *context,
+                                                          eotf,
+                                                          lum);
+ }
++
++/* Set only while constructing a new output/blending color state. */
++void
++clutter_color_state_params_set_sdr_correction (ClutterColorState *state,
++                                               float gamma,
++                                               float saturation)
++{
++  ClutterColorStateParams *params = CLUTTER_COLOR_STATE_PARAMS (state);
++  g_return_if_fail (isfinite (gamma) && gamma >= 0.5f && gamma <= 2.0f);
++  g_return_if_fail (isfinite (saturation) && saturation >= 0.0f && saturation <= 2.0f);
++  params->sdr_gamma = gamma;
++  params->sdr_saturation = saturation;
++}
+diff --git a/clutter/clutter/clutter-color-state-params.h b/clutter/clutter/clutter-color-state-params.h
+index bec38de..58ca69b 100644
+--- a/clutter/clutter/clutter-color-state-params.h
++++ b/clutter/clutter/clutter-color-state-params.h
+@@ -189,4 +189,9 @@ void clutter_color_state_params_do_tone_mapping (ClutterColorState *color_state,
+                                                  float             *data,
+                                                  int                n_samples);
+ 
++CLUTTER_EXPORT
++void clutter_color_state_params_set_sdr_correction (ClutterColorState *state,
++                                                     float gamma,
++                                                     float saturation);
++
+ G_END_DECLS
+diff --git a/clutter/clutter/clutter-color-state-private.h b/clutter/clutter/clutter-color-state-private.h
+index b5bb07c..524edbe 100644
+--- a/clutter/clutter/clutter-color-state-private.h
++++ b/clutter/clutter/clutter-color-state-private.h
+@@ -40,6 +40,7 @@ typedef struct _ClutterColorTransformKey
+   guint lut_3d           : 1;
+   /* Alpha channel is always 1.0 */
+   guint opaque_bit       : 1;
++  guint sdr_correction_bit : 1;
+ } ClutterColorTransformKey;
+ 
+ typedef struct _ClutterColorOpSnippet
+diff --git a/clutter/clutter/clutter-color-state.c b/clutter/clutter/clutter-color-state.c
+index bd09dd6..82dd690 100644
+--- a/clutter/clutter/clutter-color-state.c
++++ b/clutter/clutter/clutter-color-state.c
+@@ -108,7 +108,8 @@ clutter_color_transform_key_hash (gconstpointer data)
+          key->color_trans_bit  << 9 |
+          key->tone_mapping_bit << 10 |
+          key->lut_3d           << 11 |
+-         key->opaque_bit       << 12;
++         key->opaque_bit       << 12 |
++         key->sdr_correction_bit << 13;
+ }
+ 
+ gboolean
+@@ -124,7 +125,8 @@ clutter_color_transform_key_equal (gconstpointer data1,
+           key1->color_trans_bit == key2->color_trans_bit &&
+           key1->tone_mapping_bit == key2->tone_mapping_bit &&
+           key1->lut_3d == key2->lut_3d &&
+-          key1->opaque_bit == key2->opaque_bit);
++          key1->opaque_bit == key2->opaque_bit &&
++          key1->sdr_correction_bit == key2->sdr_correction_bit);
+ }
+ 
+ void
+@@ -139,6 +141,7 @@ clutter_color_state_init_3d_lut_transform_key (ClutterColorState               *
+   key->color_trans_bit = 0;
+   key->tone_mapping_bit = 0;
+   key->lut_3d = 1;
++  key->sdr_correction_bit = 0;
+   key->opaque_bit = !!(flags & CLUTTER_COLOR_STATE_TRANSFORM_OPAQUE);
+ }
+ 
+diff --git a/data/org.gnome.mutter.gschema.xml.in b/data/org.gnome.mutter.gschema.xml.in
+index 0912b11..5789f03 100644
+--- a/data/org.gnome.mutter.gschema.xml.in
++++ b/data/org.gnome.mutter.gschema.xml.in
+@@ -156,6 +156,16 @@
+       </description>
+     </key>
+ 
++    <key name="sdr-hdr-corrections" type="a(ssssdd)">
++      <default>[]</default>
++      <summary>Per-output SDR corrections in HDR mode</summary>
++      <description>
++        Connector, vendor, product, serial, curve exponent and saturation.
++        Neutral values are 1.0 and 1.0. Only sRGB SDR sources are corrected;
++        HDR and already-composited HDR buffers retain their original values.
++      </description>
++    </key>
++
+     <child name="keybindings" schema="org.gnome.mutter.keybindings"/>
+ 
+   </schema>
+diff --git a/src/backends/meta-color-device.c b/src/backends/meta-color-device.c
+index a20e078..2b452b0 100644
+--- a/src/backends/meta-color-device.c
++++ b/src/backends/meta-color-device.c
+@@ -23,6 +23,7 @@
+ #include "backends/meta-color-device.h"
+ 
+ #include <colord.h>
++#include <math.h>
+ 
+ #include "backends/meta-backend-private.h"
+ #include "backends/meta-color-device.h"
+@@ -85,6 +86,7 @@ struct _MetaColorDevice
+   gboolean is_ready;
+ 
+   float reference_luminance_factor;
++  GSettings *sdr_correction_settings;
+ 
+   gboolean is_calibrating;
+ };
+@@ -325,6 +327,7 @@ meta_color_device_dispose (GObject *object)
+   g_clear_object (&color_device->cd_device);
+   g_clear_object (&color_device->monitor);
+   g_clear_object (&color_device->color_state);
++  g_clear_object (&color_device->sdr_correction_settings);
+ 
+   G_OBJECT_CLASS (meta_color_device_parent_class)->dispose (object);
+ }
+@@ -774,6 +777,30 @@ update_color_state (MetaColorDevice *color_device)
+                                                                 eotf,
+                                                                 luminance);
+ 
++  if (meta_monitor_get_color_mode (monitor) == META_COLOR_MODE_BT2100 &&
++      color_device->sdr_correction_settings)
++    {
++      const MetaMonitorSpec *spec = meta_monitor_get_spec (monitor);
++      g_autoptr (GVariant) profiles =
++        g_settings_get_value (color_device->sdr_correction_settings, "sdr-hdr-corrections");
++      GVariantIter iter;
++      const char *connector, *vendor, *product, *serial;
++      double gamma, saturation;
++      g_variant_iter_init (&iter, profiles);
++      while (g_variant_iter_loop (&iter, "(&s&s&s&sdd)", &connector, &vendor,
++                                   &product, &serial, &gamma, &saturation))
++        if (g_strcmp0 (connector, spec->connector) == 0 &&
++            g_strcmp0 (vendor, spec->vendor) == 0 &&
++            g_strcmp0 (product, spec->product) == 0 &&
++            g_strcmp0 (serial, spec->serial) == 0 &&
++            isfinite (gamma) && gamma >= 0.5 && gamma <= 2.0 &&
++            isfinite (saturation) && saturation >= 0.0 && saturation <= 2.0)
++          {
++            clutter_color_state_params_set_sdr_correction (color_state, gamma, saturation);
++            break;
++          }
++    }
++
+   if (!color_device->color_state ||
+       !clutter_color_state_equals (color_device->color_state, color_state))
+     {
+@@ -800,6 +827,11 @@ meta_color_device_new (MetaColorManager *color_manager,
+   color_device->color_manager = color_manager;
+   color_device->reference_luminance_factor = 1.0;
+ 
++  color_device->sdr_correction_settings = g_settings_new ("org.gnome.mutter");
++  g_signal_connect_object (color_device->sdr_correction_settings,
++                           "changed::sdr-hdr-corrections",
++                           G_CALLBACK (meta_color_device_update), color_device,
++                           G_CONNECT_SWAPPED);
+   update_color_state (color_device);
+ 
+   if (meta_monitor_is_virtual (monitor))

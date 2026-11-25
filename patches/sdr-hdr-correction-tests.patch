@@ -1,0 +1,143 @@
+diff --git a/src/tests/clutter/conform/color-state-transform.c b/src/tests/clutter/conform/color-state-transform.c
+index dfa3692..b1e0d0b 100644
+--- a/src/tests/clutter/conform/color-state-transform.c
++++ b/src/tests/clutter/conform/color-state-transform.c
+@@ -1,4 +1,5 @@
+ #include <fcntl.h>
++#include <math.h>
+ #include <glib/gstdio.h>
+ #include <sys/mman.h>
+ 
+@@ -462,7 +463,132 @@ color_state_transform_bt2020_to_bt2020 (void)
+   g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
+ }
+ 
++
++/* Compare the real GPU render to the independent CPU path, including the
++ * intermediate HDR blending buffer. Rebuild output states to exercise cache
++ * transitions between neutral and multiple non-neutral uniform values. */
++static void
++color_state_transform_sdr_correction (void)
++{
++  ClutterContext *context = clutter_test_get_context ();
++  ClutterActor *stage = clutter_test_get_stage ();
++  ClutterStageView *view = get_stage_view (stage);
++  g_autoptr (ClutterColorState) source =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_SRGB,
++                                    CLUTTER_TRANSFER_FUNCTION_GAMMA22);
++  GList *actors = create_actors (stage);
++  const float curves[] = { 1.0f, 1.25f, 1.5f, 1.0f };
++
++  actors_set_color_state (actors, source);
++  for (unsigned int i = 0; i < G_N_ELEMENTS (curves); i++)
++    {
++      g_autoptr (ClutterColorState) target =
++        clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
++                                        CLUTTER_TRANSFER_FUNCTION_PQ);
++      clutter_color_state_params_set_sdr_correction (target, curves[i], 1.2f);
++      stage_view_set_color_state (view, target);
++      clutter_actor_queue_redraw (stage);
++      wait_for_paint (stage);
++      validate_transform (stage, source, clutter_stage_view_get_color_state (view), target);
++    }
++  g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
++}
++
++static void
++color_state_transform_correction_hdr_bypass (void)
++{
++  ClutterContext *context = clutter_test_get_context ();
++  g_autoptr (ClutterColorState) plain =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
++                                    CLUTTER_TRANSFER_FUNCTION_PQ);
++  g_autoptr (ClutterColorState) corrected =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
++                                    CLUTTER_TRANSFER_FUNCTION_PQ);
++  g_autoptr (ClutterColorState) blend = NULL;
++  g_autoptr (ClutterColorState) plain_blend = NULL;
++  g_autoptr (ClutterColorState) sdr =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_SRGB,
++                                    CLUTTER_TRANSFER_FUNCTION_GAMMA22);
++  float gray[] = { 0.5f, 0.5f, 0.5f };
++  float neutral_gray[] = { 0.5f, 0.5f, 0.5f };
++
++  clutter_color_state_params_set_sdr_correction (corrected, 1.4f, 1.3f);
++  g_assert_false (clutter_color_state_equals (plain, corrected));
++  /* Correction alone must not disqualify otherwise identical HDR scanout. */
++  g_assert_false (clutter_color_state_needs_mapping (plain, corrected));
++  blend = clutter_color_state_get_blending (corrected, FALSE);
++  plain_blend = clutter_color_state_get_blending (plain, FALSE);
++  for (unsigned int i = 0; i < G_N_ELEMENTS (test_colors); i++)
++    {
++      float reference[] = { test_colors[i].r, test_colors[i].g, test_colors[i].b };
++      float direct[] = { reference[0], reference[1], reference[2] };
++      float via_blend[] = { reference[0], reference[1], reference[2] };
++      float reference_blend[] = { reference[0], reference[1], reference[2] };
++      clutter_color_state_do_transform (plain, plain, reference, 1);
++      clutter_color_state_do_transform (plain, corrected, direct, 1);
++      clutter_color_state_do_transform (plain, plain_blend, reference_blend, 1);
++      clutter_color_state_do_transform (plain_blend, plain, reference_blend, 1);
++      clutter_color_state_do_transform (plain, blend, via_blend, 1);
++      clutter_color_state_do_transform (blend, corrected, via_blend, 1);
++      for (int c = 0; c < 3; c++)
++        {
++          g_assert_cmpfloat_with_epsilon (reference[c], direct[c], 0.0001f);
++          g_assert_cmpfloat_with_epsilon (reference_blend[c], via_blend[c], 0.0001f);
++        }
++    }
++  clutter_color_state_do_transform (sdr, plain, neutral_gray, 1);
++  clutter_color_state_do_transform (sdr, corrected, gray, 1);
++  /* Compare the actual HDR shader path with and without the profile.
++   * Out-of-sRGB primaries can produce negative blend values: the existing CPU
++   * transform clamps those, so it is not a round-trip HDR reference. */
++  ClutterActor *stage = clutter_test_get_stage ();
++  ClutterStageView *view = get_stage_view (stage);
++  GList *actors = create_actors (stage);
++  float baseline_blend[G_N_ELEMENTS (test_colors)][4];
++  float baseline_output[G_N_ELEMENTS (test_colors)][4];
++  actors_set_color_state (actors, plain);
++  stage_view_set_color_state (view, plain);
++  clutter_actor_queue_redraw (stage);
++  wait_for_paint (stage);
++  for (int i = 0; i < G_N_ELEMENTS (test_colors); i++)
++    {
++      cogl_framebuffer_read_pixels (clutter_stage_view_get_framebuffer (view),
++                                    i * ACTOR_SIZE, 0, 1, 1,
++                                    COGL_PIXEL_FORMAT_RGBA_FP_32323232_PRE,
++                                    (uint8_t *) baseline_blend[i]);
++      cogl_framebuffer_read_pixels (clutter_stage_view_get_onscreen (view),
++                                    i * ACTOR_SIZE, 0, 1, 1,
++                                    COGL_PIXEL_FORMAT_RGBA_FP_32323232_PRE,
++                                    (uint8_t *) baseline_output[i]);
++    }
++  stage_view_set_color_state (view, corrected);
++  clutter_actor_queue_redraw (stage);
++  wait_for_paint (stage);
++  for (int i = 0; i < G_N_ELEMENTS (test_colors); i++)
++    {
++      float blend_pixel[4], output_pixel[4];
++      cogl_framebuffer_read_pixels (clutter_stage_view_get_framebuffer (view),
++                                    i * ACTOR_SIZE, 0, 1, 1,
++                                    COGL_PIXEL_FORMAT_RGBA_FP_32323232_PRE,
++                                    (uint8_t *) blend_pixel);
++      cogl_framebuffer_read_pixels (clutter_stage_view_get_onscreen (view),
++                                    i * ACTOR_SIZE, 0, 1, 1,
++                                    COGL_PIXEL_FORMAT_RGBA_FP_32323232_PRE,
++                                    (uint8_t *) output_pixel);
++      for (int c = 0; c < 4; c++)
++        {
++          g_assert_cmpfloat_with_epsilon (baseline_blend[i][c], blend_pixel[c], 0.001f);
++          g_assert_cmpfloat_with_epsilon (baseline_output[i][c], output_pixel[c], 0.001f);
++        }
++    }
++  g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
++  /* Confirm the correction actually changes SDR, rather than bypassing all. */
++  g_assert_cmpfloat (gray[0], <, neutral_gray[0] - 0.01f);
++}
++
+ CLUTTER_TEST_SUITE (
++  CLUTTER_TEST_UNIT ("/color-state-transform/sdr-correction", color_state_transform_sdr_correction)
++  CLUTTER_TEST_UNIT ("/color-state-transform/correction-hdr-bypass", color_state_transform_correction_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/icc-to-params", color_state_transform_icc_to_params)
+   CLUTTER_TEST_UNIT ("/color-state-transform/params-to-icc", color_state_transform_params_to_icc)
+   CLUTTER_TEST_UNIT ("/color-state-transform/icc-to-icc", color_state_transform_icc_to_icc)
