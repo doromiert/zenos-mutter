@@ -20,7 +20,8 @@ in mutter.overrideAttrs (old: {
     export HOME="$TMPDIR/home" XDG_RUNTIME_DIR="$TMPDIR/runtime"
     mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
     chmod 700 "$XDG_RUNTIME_DIR"
-    export META_DBUS_RUNNER_DISABLE_LOGIND_PASSTHROUGH=1
+    export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gnome-settings-daemon}/share/gsettings-schemas/${pkgs.gnome-settings-daemon.name}"
+    export META_DBUS_RUNNER_DISABLE_LOGIND_PASSTHROUGH=1 META_DBUS_RUNNER_DISABLE_UMOCKDEV=1
     export __EGL_VENDOR_LIBRARY_FILENAMES=${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json
     export LIBGL_DRIVERS_PATH=${pkgs.mesa}/lib/dri LIBGL_ALWAYS_SOFTWARE=1
     meson test --setup mutter:default color-state-transform --print-errorlogs
