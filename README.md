@@ -109,3 +109,25 @@ reference factors1.0,0.5,0.2,1.0, alongside CPU/GPU pixels and dimmed-HDR bypass
 All13 native render tests pass in Mesa26.1.8 surfaceless/GLib2.88.3 on Mutter50.4.
 The same named-PQ regression against the prior implementation fails at half
 brightness:408.884nits versus expected204.44nits. Production build also passes.
+
+
+## Per-monitor brightness-slider curves
+
+`sdr-hdr-brightness-curves` is a neutral-by-default `a(ssssad)` setting:
+connector/vendor/product/serial plus five nondecreasing finite reference-white
+values between 1 and 1000 nits at slider percentages 0/25/50/75/100. The knots
+interpolate linearly. Ref-white backlight raw targets are 10..210 in Mutter50.4;
+the mapping converts that range to slider percentage before interpolation.
+Invalid profiles are ignored; empty settings retain the previous behavior.
+
+An enabled curve uses nominal output reference luminance for native HDR and
+adjusts only eligible SDR's grading normalization, preserving the existing color
+profile and exposure. The curve replaces its SDR-white parameter at render time;
+exposure still applies afterwards. There is no extra pass, framebuffer, polling
+loop or background application. Profiles follow exact monitor identities.
+
+The curve helper tests exact knots, interpolation, independent profiles and
+invalid inputs. All15 native Clutter transform tests pass on Mutter50.4 with
+Mesa26.1.8/GLib2.88.3: source white1..1000 (plus accepted exposure) matches PQ
+reference and CPU/GPU rendering; real HDR blend/output pixels are unchanged.
+This is software verification, not measured monitor calibration.

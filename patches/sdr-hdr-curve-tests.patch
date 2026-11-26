@@ -1,0 +1,84 @@
+diff --git a/src/tests/clutter/conform/color-state-transform.c b/src/tests/clutter/conform/color-state-transform.c
+--- a/src/tests/clutter/conform/color-state-transform.c
++++ b/src/tests/clutter/conform/color-state-transform.c
+@@ -526,6 +526,8 @@
+       for (int i = 0; i < 18; i++) mixer[i] = i % 3 == 1 ? 1.3f : i % 3 == 0 ? 12 : .1f;
+       clutter_color_state_params_set_sdr_mixer (corrected, mixer);
+     }
++  if (advanced == 4)
++    clutter_color_state_params_set_sdr_white (corrected, 37);
+   g_assert_false (clutter_color_state_equals (plain, corrected));
+   /* Correction alone must not disqualify otherwise identical HDR scanout. */
+   g_assert_false (clutter_color_state_needs_mapping (plain, corrected));
+@@ -772,7 +774,47 @@
+   check_correction_hdr_bypass (3);
+ }
+ 
++static void
++color_state_transform_sdr_slider_curve (void)
++{
++  ClutterContext *context = clutter_test_get_context ();
++  ClutterActor *stage = clutter_test_get_stage ();
++  ClutterStageView *view = get_stage_view (stage);
++  g_autoptr (ClutterColorState) source =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_SRGB,
++                                    CLUTTER_TRANSFER_FUNCTION_GAMMA22);
++  const float whites[] = { 1, 40, 100, 203, 400, 1000, 100, 1 };
++  const float profile[10] = { 1, 1.1f, .95f, 1, .02f, 1, 1, 1, 204.44f, -1 };
++  GList *actors = create_actors (stage);
++  actors_set_color_state (actors, source);
++  for (unsigned int i = 0; i < G_N_ELEMENTS (whites); i++)
++    {
++      float white[3] = { 1, 1, 1 };
++      g_autoptr (ClutterColorState) target =
++        clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
++                                        CLUTTER_TRANSFER_FUNCTION_PQ);
++      clutter_color_state_params_set_sdr_grading (target, profile);
++      clutter_color_state_params_set_sdr_white (target, whites[i]);
++      stage_view_set_color_state (view, target);
++      clutter_actor_queue_redraw (stage);
++      wait_for_paint (stage);
++      validate_transform (stage, source, clutter_stage_view_get_color_state (view), target);
++      clutter_color_state_do_transform (source, target, white, 1);
++      for (int c = 0; c < 3; c++)
++        g_assert_cmpfloat_with_epsilon (pq_test_nits (white[c]), 2 * whites[i], 2);
++    }
++  g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
++}
++
++static void
++color_state_transform_curve_hdr_bypass (void)
++{
++  check_correction_hdr_bypass (4);
++}
++
+ CLUTTER_TEST_SUITE (
++  CLUTTER_TEST_UNIT ("/color-state-transform/sdr-slider-curve", color_state_transform_sdr_slider_curve)
++  CLUTTER_TEST_UNIT ("/color-state-transform/curve-hdr-bypass", color_state_transform_curve_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/grading-brightness", color_state_transform_grading_brightness)
+   CLUTTER_TEST_UNIT ("/color-state-transform/dimmed-hdr-bypass", color_state_transform_dimmed_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/sdr-mixer", color_state_transform_sdr_mixer)
+diff --git a/src/tests/sdr-curve-unit.c b/src/tests/sdr-curve-unit.c
+--- /dev/null
++++ b/src/tests/sdr-curve-unit.c
+@@ -0,0 +1,20 @@
++#include <assert.h>
++#include "../backends/meta-sdr-brightness-curve.h"
++int main (void)
++{
++  double a[5] = { 10, 50, 100, 200, 400 };
++  double b[5] = { 20, 100, 200, 400, 800 };
++  double factors[5] = { .1, .6, 1.1, 1.6, 2.1 };
++  for (int i = 0; i < 5; i++) {
++    assert (fabs (meta_sdr_curve_white (a, 5, factors[i]) - a[i]) < .0001);
++    assert (fabs (meta_sdr_curve_white (b, 5, factors[i]) - b[i]) < .0001);
++  }
++  assert (fabs (meta_sdr_curve_white (a, 5, .35) - 30) < .0001);
++  assert (meta_sdr_curve_white (a, 4, 1) == 0);
++  assert (meta_sdr_curve_white (a, 5, NAN) == 0);
++  a[2] = 49; assert (meta_sdr_curve_white (a, 5, 1) == 0);
++  a[2] = INFINITY; assert (meta_sdr_curve_white (a, 5, 1) == 0);
++  a[2] = 1001; assert (meta_sdr_curve_white (a, 5, 1) == 0);
++  a[2] = 0; assert (meta_sdr_curve_white (a, 5, 1) == 0);
++  return 0;
++}

@@ -1,0 +1,195 @@
+diff --git a/src/backends/meta-color-device.c b/src/backends/meta-color-device.c
+--- a/src/backends/meta-color-device.c
++++ b/src/backends/meta-color-device.c
+@@ -24,6 +24,7 @@
+ 
+ #include <colord.h>
+ #include <math.h>
++#include "backends/meta-sdr-brightness-curve.h"
+ 
+ #include "backends/meta-backend-private.h"
+ #include "backends/meta-color-device.h"
+@@ -744,6 +745,36 @@
+   g_assert_not_reached ();
+ }
+ 
++/* Five reference-white knots at GNOME slider percentages 0/25/50/75/100.
++ * Ref-white backlights expose raw 10..210, not a percentage itself. */
++static double
++get_sdr_curve_white (MetaColorDevice *device)
++{
++  const MetaMonitorSpec *spec = meta_monitor_get_spec (device->monitor);
++  g_autoptr (GVariant) profiles =
++    g_settings_get_value (device->sdr_correction_settings, "sdr-hdr-brightness-curves");
++
++  for (gsize i = 0; i < g_variant_n_children (profiles); i++)
++    {
++      g_autoptr (GVariant) entry = g_variant_get_child_value (profiles, i);
++      g_autoptr (GVariant) values = NULL;
++      const char *connector, *vendor, *product, *serial;
++      const double *data;
++      gsize count;
++      double white;
++      g_variant_get (entry, "(&s&s&s&s@ad)", &connector, &vendor, &product, &serial, &values);
++      if (g_strcmp0 (connector, spec->connector) != 0 ||
++          g_strcmp0 (vendor, spec->vendor) != 0 ||
++          g_strcmp0 (product, spec->product) != 0 ||
++          g_strcmp0 (serial, spec->serial) != 0)
++        continue;
++      data = g_variant_get_fixed_array (values, &count, sizeof (double));
++      white = meta_sdr_curve_white (data, count, device->reference_luminance_factor);
++      if (white > 0) return white;
++    }
++  return 0;
++}
++
+ static UpdateResult
+ update_color_state (MetaColorDevice *color_device)
+ {
+@@ -758,6 +789,7 @@
+   ClutterEOTF eotf;
+   ClutterLuminance luminance;
+   UpdateResult result = 0;
++  double sdr_curve_white = 0;
+ 
+   get_color_metadata_from_monitor (monitor, &colorimetry, &eotf);
+ 
+@@ -770,7 +802,12 @@
+     }
+ 
+   luminance = *clutter_eotf_get_default_luminance (eotf);
+-  luminance.ref = luminance.ref * color_device->reference_luminance_factor;
++  if (meta_monitor_get_color_mode (monitor) == META_COLOR_MODE_BT2100 &&
++      color_device->sdr_correction_settings)
++    sdr_curve_white = get_sdr_curve_white (color_device);
++  /* An enabled curve moves only SDR; keep native HDR at its nominal mapping. */
++  if (sdr_curve_white == 0)
++    luminance.ref *= color_device->reference_luminance_factor;
+ 
+   color_state = clutter_color_state_params_new_from_primitives (clutter_context,
+                                                                 colorimetry,
+@@ -865,6 +902,8 @@
+             }
+         }
+ 
++      if (sdr_curve_white > 0)
++        clutter_color_state_params_set_sdr_white (color_state, sdr_curve_white);
+     }
+ 
+   if (!color_device->color_state ||
+@@ -904,6 +943,10 @@
+                            G_CONNECT_SWAPPED);
+   g_signal_connect_object (color_device->sdr_correction_settings,
+                            "changed::sdr-hdr-color-mixer",
++                           G_CALLBACK (meta_color_device_update), color_device,
++                           G_CONNECT_SWAPPED);
++  g_signal_connect_object (color_device->sdr_correction_settings,
++                           "changed::sdr-hdr-brightness-curves",
+                            G_CALLBACK (meta_color_device_update), color_device,
+                            G_CONNECT_SWAPPED);
+   update_color_state (color_device);
+@@ -1640,6 +1683,7 @@
+ {
+   MetaMonitor *monitor = color_device->monitor;
+   UpdateResult result = 0;
++  double sdr_curve_white = 0;
+ 
+   if (!meta_monitor_is_active (monitor))
+     return;
+diff --git a/clutter/clutter/clutter-color-state-params.c b/clutter/clutter/clutter-color-state-params.c
+--- a/clutter/clutter/clutter-color-state-params.c
++++ b/clutter/clutter/clutter-color-state-params.c
+@@ -2894,3 +2894,23 @@
+   memcpy (params->sdr_mixer, values, sizeof params->sdr_mixer);
+   params->sdr_mixer_enabled = enabled;
+ }
++
++/* Called after global grading, while constructing a new output state. */
++void
++clutter_color_state_params_set_sdr_white (ClutterColorState *state,
++                                         float              white)
++{
++  ClutterColorStateParams *params = CLUTTER_COLOR_STATE_PARAMS (state);
++  g_return_if_fail (isfinite (white) && white >= 1 && white <= 1000);
++  if (!params->sdr_grading_enabled)
++    {
++      const float neutral[10] = { 0, 1, 1 / params->sdr_gamma,
++                                 params->sdr_saturation, 0, 1, 1, 1, 203, 0 };
++      clutter_color_state_params_set_sdr_grading (state, neutral);
++    }
++  /* Existing profile values stay intact; only SDR's normalization changes.
++   * Native HDR skips this operation, including through the blend state. */
++  params->sdr_grading_reference =
++    clutter_eotf_get_default_luminance (params->eotf)->ref *
++    params->sdr_grading[8] / white;
++}
+diff --git a/clutter/clutter/clutter-color-state-params.h b/clutter/clutter/clutter-color-state-params.h
+--- a/clutter/clutter/clutter-color-state-params.h
++++ b/clutter/clutter/clutter-color-state-params.h
+@@ -203,4 +203,8 @@
+ void clutter_color_state_params_set_sdr_mixer (ClutterColorState *state,
+                                               const float values[18]);
+ 
++CLUTTER_EXPORT
++void clutter_color_state_params_set_sdr_white (ClutterColorState *state,
++                                                float white);
++
+ G_END_DECLS
+diff --git a/data/org.gnome.mutter.gschema.xml.in b/data/org.gnome.mutter.gschema.xml.in
+--- a/data/org.gnome.mutter.gschema.xml.in
++++ b/data/org.gnome.mutter.gschema.xml.in
+@@ -187,6 +187,16 @@
+ 
+     <child name="keybindings" schema="org.gnome.mutter.keybindings"/>
+ 
++    <key name="sdr-hdr-brightness-curves" type="a(ssssad)">
++      <default>[]</default>
++      <summary>Per-monitor SDR reference-white brightness curves in HDR</summary>
++      <description>Connector, vendor, product and serial followed by five
++      nondecreasing finite reference-white values (1..1000 nits) at GNOME slider
++      percentages 0,25,50,75,100. Linear interpolation controls eligible SDR only;
++      native HDR keeps its nominal mapping. Existing exposure grading still
++      applies. Empty or invalid profiles preserve ordinary brightness behavior.
++      </description>
++    </key>
+   </schema>
+   <schema id="org.gnome.mutter.keybindings" path="/org/gnome/mutter/keybindings/">
+ 
+@@ -215,5 +225,15 @@
+       <summary>Cancel any active input capture session</summary>
+     </key>
+ 
++    <key name="sdr-hdr-brightness-curves" type="a(ssssad)">
++      <default>[]</default>
++      <summary>Per-monitor SDR reference-white brightness curves in HDR</summary>
++      <description>Connector, vendor, product and serial followed by five
++      nondecreasing finite reference-white values (1..1000 nits) at GNOME slider
++      percentages 0,25,50,75,100. Linear interpolation controls eligible SDR only;
++      native HDR keeps its nominal mapping. Existing exposure grading still
++      applies. Empty or invalid profiles preserve ordinary brightness behavior.
++      </description>
++    </key>
+   </schema>
+ </schemalist>
+diff --git a/src/backends/meta-sdr-brightness-curve.h b/src/backends/meta-sdr-brightness-curve.h
+--- /dev/null
++++ b/src/backends/meta-sdr-brightness-curve.h
+@@ -0,0 +1,18 @@
++/* Optional SDR reference-white interpolation; zero means invalid/disabled. */
++#pragma once
++#include <math.h>
++#include <stddef.h>
++
++static inline double
++meta_sdr_curve_white (const double *points, size_t count, double factor)
++{
++  double position;
++  int segment;
++  if (count != 5 || !isfinite (factor)) return 0;
++  for (size_t i = 0; i < count; i++)
++    if (!isfinite (points[i]) || points[i] < 1 || points[i] > 1000 ||
++        (i && points[i] < points[i - 1])) return 0;
++  position = fmin (4, fmax (0, (factor - .1) * 2));
++  segment = (int) fmin (3, position);
++  return points[segment] + (points[segment + 1] - points[segment]) * (position - segment);
++}
