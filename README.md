@@ -69,3 +69,28 @@ The native rounded-corners fixture on GNOME Shell/Mutter50.4 reproduces the
 old darkening (PQ gray148 becomes137 only while rounded); the corrected path
 keeps gray bands identical when rounded, maximized and restored. This does not
 establish appearance on every physical monitor.
+
+## Six-color SDR mixer
+
+`org.gnome.mutter sdr-hdr-color-mixer` is `a(ssssad)`, using the same exact
+connector/vendor/product/serial identity and eighteen values. Band order is red,
+yellow, green, cyan, blue, magenta; each band supplies hue (-30..30 degrees),
+saturation (0..2, neutral1), brightness (-1..1 exposure stops, neutral0). Default
+is empty, and a neutral profile has no effect. Finite values and exact length are
+validated before applying. The existing ten-value grading API stays unchanged.
+
+Weights use the source's encoded-sRGB hue with smooth transitions to neighboring
+bands. Near-neutral saturation fades the adjustment out completely; red-only
+adjustments preserve pure yellow and a neutral ramp. Hue/chroma use linear
+Rec709-luminance-preserving UV rotation/scaling, with selective brightness in
+stops. The mixer follows global grading, while its band selection uses the
+original source color, so global hue/gain changes do not move selection bands.
+Extended working RGB survives until destination conversion. This remains bounded
+to parameterized sRGB SDR sources in HDR mode; native HDR/ICC/wide-gamut source
+limitations of the earlier grading patch remain. There is no extra render pass.
+
+All eleven native color-transform tests pass in the isolated Mesa26.1.8
+surfaceless environment on Mutter50.4/GLib2.88.3. New cases check all six bands,
+neutral transitions, CPU/GPU agreement, gray protection, red-versus-yellow
+separation and actual HDR pixel bypass. This is technical verification, not a
+physical monitor calibration or a new AMD-hardware test.

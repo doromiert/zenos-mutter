@@ -1,0 +1,302 @@
+diff --git a/clutter/clutter/clutter-color-state-params.c b/clutter/clutter/clutter-color-state-params.c
+--- a/clutter/clutter/clutter-color-state-params.c
++++ b/clutter/clutter/clutter-color-state-params.c
+@@ -64,6 +64,8 @@
+   gboolean sdr_grading_enabled;
+   float sdr_grading[10];
+   float sdr_grading_reference;
++  gboolean sdr_mixer_enabled;
++  float sdr_mixer[18];
+ } ClutterColorStateParams;
+ 
+ G_DEFINE_TYPE (ClutterColorStateParams,
+@@ -612,7 +614,7 @@
+                              .colorspace = CLUTTER_COLORSPACE_SRGB };
+   const ClutterLuminance *lum = clutter_color_state_params_get_luminance (source);
+ 
+-  return (target->sdr_grading_enabled ||
++  return (target->sdr_mixer_enabled || target->sdr_grading_enabled ||
+           target->sdr_gamma != 1.0f || target->sdr_saturation != 1.0f) &&
+          !(source->eotf.type == CLUTTER_EOTF_TYPE_NAMED &&
+            source->eotf.tf_name == CLUTTER_TRANSFER_FUNCTION_PQ) &&
+@@ -633,6 +635,40 @@
+     "}\n"
+     "float grading_decode (float x) {\n"
+     "  return x <= 0.04045 ? x / 12.92 : pow ((x + 0.055) / 1.055, 2.4);\n"
++    "}\n"
++    "uniform float sdr_mixer_enabled;\n"
++    "uniform float sdr_mixer[18];\n"
++    "vec3 sdr_mix (vec3 color, vec3 original) {\n"
++    "  if (sdr_mixer_enabled < 0.5) return color;\n"
++    "  vec3 encoded = clamp (vec3 (grading_encode (original.r), grading_encode (original.g), grading_encode (original.b)), 0.0, 1.0);\n"
++    "  float hi = max (max (encoded.r, encoded.g), encoded.b);\n"
++    "  float lo = min (min (encoded.r, encoded.g), encoded.b);\n"
++    "  float delta = hi - lo;\n"
++    "  float saturation = hi > 0.0 ? delta / hi : 0.0;\n"
++    "  float mask = smoothstep (0.02, 0.15, saturation);\n"
++    "  if (mask == 0.0) return color;\n"
++    "  float hue = hi == encoded.r ? (encoded.g - encoded.b) / delta :\n"
++    "              hi == encoded.g ? 2.0 + (encoded.b - encoded.r) / delta :\n"
++    "                                4.0 + (encoded.r - encoded.g) / delta;\n"
++    "  if (hue < 0.0) hue += 6.0;\n"
++    "  vec3 adjustment = vec3 (0.0);\n"
++    "  for (int band = 0; band < 6; band++) {\n"
++    "    float distance = abs (hue - float (band));\n"
++    "    distance = min (distance, 6.0 - distance);\n"
++    "    float weight = smoothstep (0.0, 1.0, clamp (1.0 - distance, 0.0, 1.0));\n"
++    "    adjustment += weight * vec3 (sdr_mixer[3 * band], sdr_mixer[3 * band + 1] - 1.0, sdr_mixer[3 * band + 2]);\n"
++    "  }\n"
++    "  adjustment *= mask;\n"
++    "  float y = dot (color, vec3 (0.2126, 0.7152, 0.0722));\n"
++    "  float u = (color.b - y) / 1.8556;\n"
++    "  float v = (color.r - y) / 1.5748;\n"
++    "  float angle = adjustment.x * 0.01745329252;\n"
++    "  float ru = (u * cos (angle) - v * sin (angle)) * (1.0 + adjustment.y);\n"
++    "  float rv = (u * sin (angle) + v * cos (angle)) * (1.0 + adjustment.y);\n"
++    "  color.r = y + 1.5748 * rv;\n"
++    "  color.b = y + 1.8556 * ru;\n"
++    "  color.g = (y - 0.2126 * color.r - 0.0722 * color.b) / 0.7152;\n"
++    "  return color * exp2 (adjustment.z);\n"
+     "}\n"
+     "vec3 sdr_grade (vec3 color) {\n"
+     "  vec3 encoded = vec3 (grading_encode (color.r), grading_encode (color.g), grading_encode (color.b));\n"
+@@ -654,10 +690,11 @@
+     "  return color * sdr_grading[8];\n"
+     "}\n"
+     "vec3 sdr_correction (vec3 color) {\n"
+-    "  if (sdr_grading_enabled > 0.5) return sdr_grade (color);\n"
++    "  vec3 original = color;\n"
++    "  if (sdr_grading_enabled > 0.5) return sdr_mix (sdr_grade (color), original);\n"
+     "  color = pow (max (color, vec3 (0.0)), vec3 (sdr_gamma));\n"
+     "  float peak = max (max (color.r, color.g), color.b);\n"
+-    "  return clamp (mix (vec3 (peak), color, sdr_saturation), 0.0, 1.0);\n"
++    "  return sdr_mix (clamp (mix (vec3 (peak), color, sdr_saturation), 0.0, 1.0), original);\n"
+     "}\n",
+ };
+ 
+@@ -1889,6 +1926,13 @@
+       cogl_pipeline_set_uniform_1f (pipeline,
+         cogl_pipeline_get_uniform_location (pipeline, "sdr_grading_enabled"),
+         target_color_state_params->sdr_grading_enabled ? 1.0f : 0.0f);
++      cogl_pipeline_set_uniform_1f (pipeline,
++        cogl_pipeline_get_uniform_location (pipeline, "sdr_mixer_enabled"),
++        target_color_state_params->sdr_mixer_enabled ? 1.0f : 0.0f);
++      if (target_color_state_params->sdr_mixer_enabled)
++        cogl_pipeline_set_uniform_float (pipeline,
++          cogl_pipeline_get_uniform_location (pipeline, "sdr_mixer[0]"),
++          1, 18, target_color_state_params->sdr_mixer);
+       if (target_color_state_params->sdr_grading_enabled)
+         {
+           float values[10];
+@@ -2151,6 +2195,59 @@
+     rgb[c] *= p[8] / reference_white;
+ }
+ 
++static float
++mixer_smoothstep (float low, float high, float value)
++{
++  float t = CLAMP ((value - low) / (high - low), 0.0f, 1.0f);
++  return t * t * (3.0f - 2.0f * t);
++}
++
++static void
++apply_sdr_mixer_rgb (float rgb[4], const float original[3], const float p[18])
++{
++  float encoded[3], hi, lo, delta, saturation, mask, hue;
++  float adjustment[3] = { 0 };
++  float y, u, v, angle, ru, rv;
++  for (int c = 0; c < 3; c++)
++    {
++      float x = MAX (original[c], 0.0f);
++      encoded[c] = CLAMP (x <= 0.0031308f ? x * 12.92f :
++                          1.055f * powf (x, 1.0f / 2.4f) - 0.055f, 0.0f, 1.0f);
++    }
++  hi = MAX (MAX (encoded[0], encoded[1]), encoded[2]);
++  lo = MIN (MIN (encoded[0], encoded[1]), encoded[2]);
++  delta = hi - lo;
++  saturation = hi > 0 ? delta / hi : 0;
++  mask = mixer_smoothstep (0.02f, 0.15f, saturation);
++  if (mask == 0)
++    return;
++  hue = hi == encoded[0] ? (encoded[1] - encoded[2]) / delta :
++        hi == encoded[1] ? 2 + (encoded[2] - encoded[0]) / delta :
++                          4 + (encoded[0] - encoded[1]) / delta;
++  if (hue < 0) hue += 6;
++  for (int band = 0; band < 6; band++)
++    {
++      float distance = fabsf (hue - band);
++      float weight;
++      distance = MIN (distance, 6 - distance);
++      weight = mixer_smoothstep (0, 1, CLAMP (1 - distance, 0.0f, 1.0f));
++      adjustment[0] += weight * p[3 * band];
++      adjustment[1] += weight * (p[3 * band + 1] - 1);
++      adjustment[2] += weight * p[3 * band + 2];
++    }
++  for (int c = 0; c < 3; c++) adjustment[c] *= mask;
++  y = 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
++  u = (rgb[2] - y) / 1.8556f;
++  v = (rgb[0] - y) / 1.5748f;
++  angle = adjustment[0] * 0.01745329252f;
++  ru = (u * cosf (angle) - v * sinf (angle)) * (1 + adjustment[1]);
++  rv = (u * sinf (angle) + v * cosf (angle)) * (1 + adjustment[1]);
++  rgb[0] = y + 1.5748f * rv;
++  rgb[2] = y + 1.8556f * ru;
++  rgb[1] = (y - 0.2126f * rgb[0] - 0.0722f * rgb[2]) / 0.7152f;
++  for (int c = 0; c < 3; c++) rgb[c] *= exp2f (adjustment[2]);
++}
++
+ static void
+ apply_sdr_correction_xyz (ClutterColorStateParams *source,
+                           ClutterColorStateParams *target,
+@@ -2166,9 +2263,11 @@
+       graphene_vec4_t v;
+       float rgb[4] = { data[0], data[1], data[2], 1.0f };
+       float peak;
++      float original[3];
+       graphene_vec4_init_from_float (&v, rgb);
+       graphene_matrix_transform_vec4 (&from_xyz, &v, &v);
+       graphene_vec4_to_float (&v, rgb);
++      memcpy (original, rgb, sizeof original);
+       if (target->sdr_grading_enabled)
+         apply_sdr_grading_rgb (rgb, target->sdr_grading,
+                               target->sdr_grading_reference);
+@@ -2180,6 +2279,8 @@
+           for (channel = 0; channel < 3; channel++)
+             rgb[channel] = CLAMP (peak + (rgb[channel] - peak) * target->sdr_saturation, 0.0f, 1.0f);
+         }
++      if (target->sdr_mixer_enabled)
++        apply_sdr_mixer_rgb (rgb, original, target->sdr_mixer);
+       graphene_vec4_init_from_float (&v, rgb);
+       graphene_matrix_transform_vec4 (&to_xyz, &v, &v);
+       graphene_vec4_to_float (&v, rgb);
+@@ -2264,6 +2365,10 @@
+   return luminances_equal (lum, target_lum) &&
+          color_state_params->sdr_gamma == other_color_state_params->sdr_gamma &&
+          color_state_params->sdr_saturation == other_color_state_params->sdr_saturation &&
++         color_state_params->sdr_mixer_enabled == other_color_state_params->sdr_mixer_enabled &&
++         (!color_state_params->sdr_mixer_enabled ||
++          memcmp (color_state_params->sdr_mixer, other_color_state_params->sdr_mixer,
++                  sizeof color_state_params->sdr_mixer) == 0) &&
+          color_state_params->sdr_grading_enabled == other_color_state_params->sdr_grading_enabled &&
+          (!color_state_params->sdr_grading_enabled ||
+           (color_state_params->sdr_grading_reference == other_color_state_params->sdr_grading_reference &&
+@@ -2417,6 +2522,9 @@
+   clutter_color_state_params_set_sdr_correction (blending_state,
+                                                  color_state_params->sdr_gamma,
+                                                  color_state_params->sdr_saturation);
++  if (color_state_params->sdr_mixer_enabled)
++    clutter_color_state_params_set_sdr_mixer (blending_state,
++                                             color_state_params->sdr_mixer);
+   if (color_state_params->sdr_grading_enabled)
+     {
+       clutter_color_state_params_set_sdr_grading (blending_state,
+@@ -2763,3 +2871,25 @@
+     clutter_color_state_params_get_luminance (params)->ref;
+   params->sdr_grading_enabled = TRUE;
+ }
++
++/* Six cyclic bands: red/yellow/green/cyan/blue/magenta, hue/saturation/EV. */
++void
++clutter_color_state_params_set_sdr_mixer (ClutterColorState *state,
++                                        const float values[18])
++{
++  const float lower[3] = { -30, 0, -1 };
++  const float upper[3] = { 30, 2, 1 };
++  const float neutral[3] = { 0, 1, 0 };
++  ClutterColorStateParams *params;
++  gboolean enabled = FALSE;
++  g_return_if_fail (CLUTTER_IS_COLOR_STATE_PARAMS (state));
++  g_return_if_fail (values != NULL);
++  for (int i = 0; i < 18; i++)
++    {
++      g_return_if_fail (isfinite (values[i]) && values[i] >= lower[i % 3] && values[i] <= upper[i % 3]);
++      enabled |= values[i] != neutral[i % 3];
++    }
++  params = CLUTTER_COLOR_STATE_PARAMS (state);
++  memcpy (params->sdr_mixer, values, sizeof params->sdr_mixer);
++  params->sdr_mixer_enabled = enabled;
++}
+diff --git a/clutter/clutter/clutter-color-state-params.h b/clutter/clutter/clutter-color-state-params.h
+--- a/clutter/clutter/clutter-color-state-params.h
++++ b/clutter/clutter/clutter-color-state-params.h
+@@ -198,4 +198,9 @@
+ void clutter_color_state_params_set_sdr_grading (ClutterColorState *state,
+                                                 const float values[10]);
+ 
++
++CLUTTER_EXPORT
++void clutter_color_state_params_set_sdr_mixer (ClutterColorState *state,
++                                              const float values[18]);
++
+ G_END_DECLS
+diff --git a/src/backends/meta-color-device.c b/src/backends/meta-color-device.c
+--- a/src/backends/meta-color-device.c
++++ b/src/backends/meta-color-device.c
+@@ -833,6 +833,38 @@
+               break;
+             }
+         }
++      g_autoptr (GVariant) mixer =
++        g_settings_get_value (color_device->sdr_correction_settings, "sdr-hdr-color-mixer");
++      for (gsize i = 0; i < g_variant_n_children (mixer); i++)
++        {
++          g_autoptr (GVariant) entry = g_variant_get_child_value (mixer, i);
++          g_autoptr (GVariant) values = NULL;
++          const double *data;
++          gsize count;
++          float profile[18];
++          const double lower[3] = { -30, 0, -1 };
++          const double upper[3] = { 30, 2, 1 };
++          gboolean valid = TRUE;
++          g_variant_get (entry, "(&s&s&s&s@ad)", &connector, &vendor, &product, &serial, &values);
++          if (g_strcmp0 (connector, spec->connector) != 0 ||
++              g_strcmp0 (vendor, spec->vendor) != 0 ||
++              g_strcmp0 (product, spec->product) != 0 ||
++              g_strcmp0 (serial, spec->serial) != 0)
++            continue;
++          data = g_variant_get_fixed_array (values, &count, sizeof (double));
++          if (count != 18) continue;
++          for (int j = 0; j < 18; j++)
++            {
++              valid &= isfinite (data[j]) && data[j] >= lower[j % 3] && data[j] <= upper[j % 3];
++              profile[j] = (float) data[j];
++            }
++          if (valid)
++            {
++              clutter_color_state_params_set_sdr_mixer (color_state, profile);
++              break;
++            }
++        }
++
+     }
+ 
+   if (!color_device->color_state ||
+@@ -868,6 +900,10 @@
+                            G_CONNECT_SWAPPED);
+   g_signal_connect_object (color_device->sdr_correction_settings,
+                            "changed::sdr-hdr-grading",
++                           G_CALLBACK (meta_color_device_update), color_device,
++                           G_CONNECT_SWAPPED);
++  g_signal_connect_object (color_device->sdr_correction_settings,
++                           "changed::sdr-hdr-color-mixer",
+                            G_CALLBACK (meta_color_device_update), color_device,
+                            G_CONNECT_SWAPPED);
+   update_color_state (color_device);
+diff --git a/data/org.gnome.mutter.gschema.xml.in b/data/org.gnome.mutter.gschema.xml.in
+--- a/data/org.gnome.mutter.gschema.xml.in
++++ b/data/org.gnome.mutter.gschema.xml.in
+@@ -166,6 +166,14 @@
+       </description>
+     </key>
+ 
++    <key name="sdr-hdr-color-mixer" type="a(ssssad)">
++      <default>[]</default>
++      <summary>Per-monitor six-band SDR appearance mixer for HDR output</summary>
++      <description>Connector, vendor, product, serial and exactly eighteen doubles.
++      Red, yellow, green, cyan, blue and magenta each have hue (-30..30 degrees),
++      saturation (0..2) and brightness (-1..1 stops). Neutral bands are 0,1,0.
++      Applies only to eligible SDR sources in HDR mode, preserving native HDR.</description>
++    </key>
+     <key name="sdr-hdr-grading" type="a(ssssad)">
+       <default>[]</default>
+       <summary>Per-output SDR appearance profiles in HDR mode</summary>

@@ -1,0 +1,102 @@
+diff --git a/src/tests/clutter/conform/color-state-transform.c b/src/tests/clutter/conform/color-state-transform.c
+--- a/src/tests/clutter/conform/color-state-transform.c
++++ b/src/tests/clutter/conform/color-state-transform.c
+@@ -495,7 +495,7 @@
+ }
+ 
+ static void
+-check_correction_hdr_bypass (gboolean advanced)
++check_correction_hdr_bypass (int advanced)
+ {
+   ClutterContext *context = clutter_test_get_context ();
+   g_autoptr (ClutterColorState) plain =
+@@ -517,6 +517,12 @@
+     clutter_color_state_params_set_sdr_grading (corrected, saved_profile);
+   else
+     clutter_color_state_params_set_sdr_correction (corrected, 1.4f, 1.3f);
++  if (advanced == 2)
++    {
++      float mixer[18];
++      for (int i = 0; i < 18; i++) mixer[i] = i % 3 == 1 ? 1.3f : i % 3 == 0 ? 12 : .1f;
++      clutter_color_state_params_set_sdr_mixer (corrected, mixer);
++    }
+   g_assert_false (clutter_color_state_equals (plain, corrected));
+   /* Correction alone must not disqualify otherwise identical HDR scanout. */
+   g_assert_false (clutter_color_state_needs_mapping (plain, corrected));
+@@ -644,7 +650,76 @@
+   g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
+ }
+ 
++static void
++color_state_transform_mixer_hdr_bypass (void)
++{
++  check_correction_hdr_bypass (2);
++}
++
++static void
++color_state_transform_sdr_mixer (void)
++{
++  ClutterContext *context = clutter_test_get_context ();
++  ClutterActor *stage = clutter_test_get_stage ();
++  ClutterStageView *view = get_stage_view (stage);
++  g_autoptr (ClutterColorState) source =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_SRGB,
++                                    CLUTTER_TRANSFER_FUNCTION_GAMMA22);
++  g_autoptr (ClutterColorState) plain =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
++                                    CLUTTER_TRANSFER_FUNCTION_PQ);
++  GList *actors = create_actors (stage);
++  actors_set_color_state (actors, source);
++  for (int band = -1; band < 7; band++)
++    {
++      float mixer[18];
++      g_autoptr (ClutterColorState) target =
++        clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
++                                        CLUTTER_TRANSFER_FUNCTION_PQ);
++      for (int i = 0; i < 18; i++) mixer[i] = i % 3 == 1 ? 1 : 0;
++      if (band >= 0 && band < 6)
++        {
++          mixer[3 * band] = band % 2 == 0 ? -9.25f : 7.35f;
++          mixer[3 * band + 1] = band % 2 == 0 ? 1.7f : .6f;
++          mixer[3 * band + 2] = band % 2 == 0 ? .2f : -.3f;
++        }
++      clutter_color_state_params_set_sdr_mixer (target, mixer);
++      if (band == -1 || band == 6)
++        g_assert_true (clutter_color_state_equals (plain, target));
++      stage_view_set_color_state (view, target);
++      clutter_actor_queue_redraw (stage);
++      wait_for_paint (stage);
++      validate_transform (stage, source, clutter_stage_view_get_color_state (view), target);
++      /* Any band's hue, saturation and brightness must leave neutrals alone. */
++      for (int step = 0; step <= 16; step++)
++        {
++          float gray[3] = { step / 16.0f, step / 16.0f, step / 16.0f };
++          float reference[3];
++          memcpy (reference, gray, sizeof gray);
++          clutter_color_state_do_transform (source, target, gray, 1);
++          clutter_color_state_do_transform (source, plain, reference, 1);
++          for (int c = 0; c < 3; c++)
++            g_assert_cmpfloat_with_epsilon (gray[c], reference[c], 0.0001f);
++        }
++      if (band == 0)
++        {
++          float yellow[3] = { 1, 1, 0 }, reference_yellow[3] = { 1, 1, 0 };
++          float red[3] = { 1, 0, 0 }, reference_red[3] = { 1, 0, 0 };
++          clutter_color_state_do_transform (source, target, yellow, 1);
++          clutter_color_state_do_transform (source, plain, reference_yellow, 1);
++          clutter_color_state_do_transform (source, target, red, 1);
++          clutter_color_state_do_transform (source, plain, reference_red, 1);
++          for (int c = 0; c < 3; c++)
++            g_assert_cmpfloat_with_epsilon (yellow[c], reference_yellow[c], 0.0001f);
++          g_assert_cmpfloat (fabsf (red[0] - reference_red[0]) + fabsf (red[1] - reference_red[1]), >, .005f);
++        }
++    }
++  g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
++}
++
+ CLUTTER_TEST_SUITE (
++  CLUTTER_TEST_UNIT ("/color-state-transform/sdr-mixer", color_state_transform_sdr_mixer)
++  CLUTTER_TEST_UNIT ("/color-state-transform/mixer-hdr-bypass", color_state_transform_mixer_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/sdr-grading", color_state_transform_sdr_grading)
+   CLUTTER_TEST_UNIT ("/color-state-transform/grading-hdr-bypass", color_state_transform_grading_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/sdr-correction", color_state_transform_sdr_correction)
