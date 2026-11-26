@@ -1,0 +1,307 @@
+diff --git a/clutter/clutter/clutter-color-state-params.c b/clutter/clutter/clutter-color-state-params.c
+index 781bcfa..0db0b1e 100644
+--- a/clutter/clutter/clutter-color-state-params.c
++++ b/clutter/clutter/clutter-color-state-params.c
+@@ -61,6 +61,9 @@ typedef struct _ClutterColorStateParams
+   ClutterLuminance luminance;
+   float sdr_gamma;
+   float sdr_saturation;
++  gboolean sdr_grading_enabled;
++  float sdr_grading[10];
++  float sdr_grading_reference;
+ } ClutterColorStateParams;
+ 
+ G_DEFINE_TYPE (ClutterColorStateParams,
+@@ -609,7 +612,8 @@ needs_sdr_correction (ClutterColorStateParams *source,
+                              .colorspace = CLUTTER_COLORSPACE_SRGB };
+   const ClutterLuminance *lum = clutter_color_state_params_get_luminance (source);
+ 
+-  return (target->sdr_gamma != 1.0f || target->sdr_saturation != 1.0f) &&
++  return (target->sdr_grading_enabled ||
++          target->sdr_gamma != 1.0f || target->sdr_saturation != 1.0f) &&
+          !(source->eotf.type == CLUTTER_EOTF_TYPE_NAMED &&
+            source->eotf.tf_name == CLUTTER_TRANSFER_FUNCTION_PQ) &&
+          lum->mastering_max <= lum->ref * 1.01f &&
+@@ -621,7 +625,36 @@ static const ClutterColorOpSnippet sdr_correction = {
+   .source =
+     "uniform float sdr_gamma;\n"
+     "uniform float sdr_saturation;\n"
++    "uniform float sdr_grading_enabled;\n"
++    "uniform float sdr_grading[10];\n"
++    "float grading_encode (float x) {\n"
++    "  x = max (x, 0.0);\n"
++    "  return x <= 0.0031308 ? x * 12.92 : 1.055 * pow (x, 1.0 / 2.4) - 0.055;\n"
++    "}\n"
++    "float grading_decode (float x) {\n"
++    "  return x <= 0.04045 ? x / 12.92 : pow ((x + 0.055) / 1.055, 2.4);\n"
++    "}\n"
++    "vec3 sdr_grade (vec3 color) {\n"
++    "  vec3 encoded = vec3 (grading_encode (color.r), grading_encode (color.g), grading_encode (color.b));\n"
++    "  encoded = clamp ((encoded - vec3 (0.5)) * sdr_grading[1] + vec3 (0.5) +\n"
++    "                   sdr_grading[4] * pow (vec3 (1.0) - clamp (encoded, 0.0, 1.0), vec3 (2.0)), 0.0, 1.0);\n"
++    "  encoded = pow (encoded, vec3 (1.0 / sdr_grading[2]));\n"
++    "  color = vec3 (grading_decode (encoded.r), grading_decode (encoded.g), grading_decode (encoded.b));\n"
++    "  color *= exp2 (sdr_grading[0]) * vec3 (sdr_grading[5], sdr_grading[6], sdr_grading[7]);\n"
++    "  float y = dot (color, vec3 (0.2126, 0.7152, 0.0722));\n"
++    "  color = mix (vec3 (y), color, sdr_grading[3]);\n"
++    "  float u = (color.b - y) / 1.8556;\n"
++    "  float v = (color.r - y) / 1.5748;\n"
++    "  float angle = sdr_grading[9] * 0.01745329252;\n"
++    "  float rotated_u = u * cos (angle) - v * sin (angle);\n"
++    "  float rotated_v = u * sin (angle) + v * cos (angle);\n"
++    "  color.r = y + 1.5748 * rotated_v;\n"
++    "  color.b = y + 1.8556 * rotated_u;\n"
++    "  color.g = (y - 0.2126 * color.r - 0.0722 * color.b) / 0.7152;\n"
++    "  return color * sdr_grading[8];\n"
++    "}\n"
+     "vec3 sdr_correction (vec3 color) {\n"
++    "  if (sdr_grading_enabled > 0.5) return sdr_grade (color);\n"
+     "  color = pow (max (color, vec3 (0.0)), vec3 (sdr_gamma));\n"
+     "  float peak = max (max (color.r, color.g), color.b);\n"
+     "  return clamp (mix (vec3 (peak), color, sdr_saturation), 0.0, 1.0);\n"
+@@ -1853,6 +1886,18 @@ clutter_color_state_params_update_uniforms (ClutterColorState *color_state,
+       int saturation_location = cogl_pipeline_get_uniform_location (pipeline, "sdr_saturation");
+       cogl_pipeline_set_uniform_1f (pipeline, gamma_location, target_color_state_params->sdr_gamma);
+       cogl_pipeline_set_uniform_1f (pipeline, saturation_location, target_color_state_params->sdr_saturation);
++      cogl_pipeline_set_uniform_1f (pipeline,
++        cogl_pipeline_get_uniform_location (pipeline, "sdr_grading_enabled"),
++        target_color_state_params->sdr_grading_enabled ? 1.0f : 0.0f);
++      if (target_color_state_params->sdr_grading_enabled)
++        {
++          float values[10];
++          memcpy (values, target_color_state_params->sdr_grading, sizeof values);
++          values[8] /= target_color_state_params->sdr_grading_reference;
++          cogl_pipeline_set_uniform_float (pipeline,
++            cogl_pipeline_get_uniform_location (pipeline, "sdr_grading[0]"),
++            1, 10, values);
++        }
+     }
+ 
+   update_eotfs_uniforms (color_state_params,
+@@ -2032,6 +2077,8 @@ clutter_color_state_params_do_transform_from_XYZ (ClutterColorState *color_state
+   ClutterColorStateParams *color_state_params =
+     CLUTTER_COLOR_STATE_PARAMS (color_state);
+   ClutterEOTF eotf = color_state_params->eotf;
++  const ClutterLuminance *lum = clutter_color_state_params_get_luminance (color_state_params);
++  gboolean hdr_intermediate = lum->mastering_max > lum->max;
+   int i;
+   float result[4];
+   graphene_matrix_t color_trans_mat;
+@@ -2057,9 +2104,10 @@ clutter_color_state_params_do_transform_from_XYZ (ClutterColorState *color_state
+       result[1] = clutter_eotf_apply_inv (eotf, result[1]);
+       result[2] = clutter_eotf_apply_inv (eotf, result[2]);
+ 
+-      data[0] = CLAMP (result[0], 0.0f, 1.0f);
+-      data[1] = CLAMP (result[1], 0.0f, 1.0f);
+-      data[2] = CLAMP (result[2], 0.0f, 1.0f);
++      /* HDR blending carries extended RGB; clipping here disagrees with GPU paint. */
++      data[0] = hdr_intermediate ? result[0] : CLAMP (result[0], 0.0f, 1.0f);
++      data[1] = hdr_intermediate ? result[1] : CLAMP (result[1], 0.0f, 1.0f);
++      data[2] = hdr_intermediate ? result[2] : CLAMP (result[2], 0.0f, 1.0f);
+ 
+       data += 3;
+     }
+@@ -2074,6 +2122,35 @@ clutter_color_state_params_do_transform_from_XYZ (ClutterColorState *color_state
+  *
+  * Applies the tone mapping to the given #ClutterColorState
+  */
++static void
++apply_sdr_grading_rgb (float rgb[4], const float p[10], float reference_white)
++{
++  float luminance, u, v, angle, rotated_u, rotated_v;
++  for (int c = 0; c < 3; c++)
++    {
++      float x = MAX (rgb[c], 0.0f);
++      float encoded = x <= 0.0031308f ? x * 12.92f : 1.055f * powf (x, 1.0f / 2.4f) - 0.055f;
++      float shadows = 1.0f - CLAMP (encoded, 0.0f, 1.0f);
++      encoded = CLAMP ((encoded - 0.5f) * p[1] + 0.5f + p[4] * shadows * shadows, 0.0f, 1.0f);
++      encoded = powf (encoded, 1.0f / p[2]);
++      rgb[c] = (encoded <= 0.04045f ? encoded / 12.92f : powf ((encoded + 0.055f) / 1.055f, 2.4f)) *
++               exp2f (p[0]) * p[5 + c];
++    }
++  luminance = 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
++  for (int c = 0; c < 3; c++)
++    rgb[c] = luminance + (rgb[c] - luminance) * p[3];
++  u = (rgb[2] - luminance) / 1.8556f;
++  v = (rgb[0] - luminance) / 1.5748f;
++  angle = p[9] * 0.01745329252f;
++  rotated_u = u * cosf (angle) - v * sinf (angle);
++  rotated_v = u * sinf (angle) + v * cosf (angle);
++  rgb[0] = luminance + 1.5748f * rotated_v;
++  rgb[2] = luminance + 1.8556f * rotated_u;
++  rgb[1] = (luminance - 0.2126f * rgb[0] - 0.0722f * rgb[2]) / 0.7152f;
++  for (int c = 0; c < 3; c++)
++    rgb[c] *= p[8] / reference_white;
++}
++
+ static void
+ apply_sdr_correction_xyz (ClutterColorStateParams *source,
+                           ClutterColorStateParams *target,
+@@ -2092,11 +2169,17 @@ apply_sdr_correction_xyz (ClutterColorStateParams *source,
+       graphene_vec4_init_from_float (&v, rgb);
+       graphene_matrix_transform_vec4 (&from_xyz, &v, &v);
+       graphene_vec4_to_float (&v, rgb);
+-      for (channel = 0; channel < 3; channel++)
+-        rgb[channel] = powf (MAX (rgb[channel], 0.0f), target->sdr_gamma);
+-      peak = MAX (MAX (rgb[0], rgb[1]), rgb[2]);
+-      for (channel = 0; channel < 3; channel++)
+-        rgb[channel] = CLAMP (peak + (rgb[channel] - peak) * target->sdr_saturation, 0.0f, 1.0f);
++      if (target->sdr_grading_enabled)
++        apply_sdr_grading_rgb (rgb, target->sdr_grading,
++                              target->sdr_grading_reference);
++      else
++        {
++          for (channel = 0; channel < 3; channel++)
++            rgb[channel] = powf (MAX (rgb[channel], 0.0f), target->sdr_gamma);
++          peak = MAX (MAX (rgb[0], rgb[1]), rgb[2]);
++          for (channel = 0; channel < 3; channel++)
++            rgb[channel] = CLAMP (peak + (rgb[channel] - peak) * target->sdr_saturation, 0.0f, 1.0f);
++        }
+       graphene_vec4_init_from_float (&v, rgb);
+       graphene_matrix_transform_vec4 (&to_xyz, &v, &v);
+       graphene_vec4_to_float (&v, rgb);
+@@ -2180,7 +2263,12 @@ clutter_color_state_params_equals (ClutterColorState *color_state,
+ 
+   return luminances_equal (lum, target_lum) &&
+          color_state_params->sdr_gamma == other_color_state_params->sdr_gamma &&
+-         color_state_params->sdr_saturation == other_color_state_params->sdr_saturation;
++         color_state_params->sdr_saturation == other_color_state_params->sdr_saturation &&
++         color_state_params->sdr_grading_enabled == other_color_state_params->sdr_grading_enabled &&
++         (!color_state_params->sdr_grading_enabled ||
++          (color_state_params->sdr_grading_reference == other_color_state_params->sdr_grading_reference &&
++           memcmp (color_state_params->sdr_grading, other_color_state_params->sdr_grading,
++                   sizeof color_state_params->sdr_grading) == 0));
+ }
+ 
+ static gboolean
+@@ -2329,6 +2417,14 @@ clutter_color_state_params_get_blending (ClutterColorState *color_state,
+   clutter_color_state_params_set_sdr_correction (blending_state,
+                                                  color_state_params->sdr_gamma,
+                                                  color_state_params->sdr_saturation);
++  if (color_state_params->sdr_grading_enabled)
++    {
++      clutter_color_state_params_set_sdr_grading (blending_state,
++                                                 color_state_params->sdr_grading);
++      /* The blend space has its own nominal white; keep the output reference. */
++      CLUTTER_COLOR_STATE_PARAMS (blending_state)->sdr_grading_reference =
++        color_state_params->sdr_grading_reference;
++    }
+   return blending_state;
+ }
+ 
+@@ -2646,3 +2742,24 @@ clutter_color_state_params_set_sdr_correction (ClutterColorState *state,
+   params->sdr_gamma = gamma;
+   params->sdr_saturation = saturation;
+ }
++
++/* Values follow Color Compare: EV, contrast, gamma, saturation, shadows,
++ * RGB gains, SDR white nits and hue degrees. HDR intermediates bypass grading. */
++void
++clutter_color_state_params_set_sdr_grading (ClutterColorState *state,
++                                          const float values[10])
++{
++  static const float lower[10] = { -2, .5, .5, 0, -.2, .5, .5, .5, 80, -45 };
++  static const float upper[10] = { 2, 2, 2, 2, .2, 1.5, 1.5, 1.5, 400, 45 };
++  ClutterColorStateParams *params;
++
++  g_return_if_fail (CLUTTER_IS_COLOR_STATE_PARAMS (state));
++  g_return_if_fail (values != NULL);
++  for (int i = 0; i < 10; i++)
++    g_return_if_fail (isfinite (values[i]) && values[i] >= lower[i] && values[i] <= upper[i]);
++  params = CLUTTER_COLOR_STATE_PARAMS (state);
++  memcpy (params->sdr_grading, values, sizeof params->sdr_grading);
++  params->sdr_grading_reference =
++    clutter_color_state_params_get_luminance (params)->ref;
++  params->sdr_grading_enabled = TRUE;
++}
+diff --git a/clutter/clutter/clutter-color-state-params.h b/clutter/clutter/clutter-color-state-params.h
+index 58ca69b..0953489 100644
+--- a/clutter/clutter/clutter-color-state-params.h
++++ b/clutter/clutter/clutter-color-state-params.h
+@@ -194,4 +194,8 @@ void clutter_color_state_params_set_sdr_correction (ClutterColorState *state,
+                                                      float gamma,
+                                                      float saturation);
+ 
++CLUTTER_EXPORT
++void clutter_color_state_params_set_sdr_grading (ClutterColorState *state,
++                                                const float values[10]);
++
+ G_END_DECLS
+diff --git a/data/org.gnome.mutter.gschema.xml.in b/data/org.gnome.mutter.gschema.xml.in
+index 5789f03..5bb1632 100644
+--- a/data/org.gnome.mutter.gschema.xml.in
++++ b/data/org.gnome.mutter.gschema.xml.in
+@@ -166,6 +166,17 @@
+       </description>
+     </key>
+ 
++    <key name="sdr-hdr-grading" type="a(ssssad)">
++      <default>[]</default>
++      <summary>Per-output SDR appearance profiles in HDR mode</summary>
++      <description>
++        Connector, vendor, product, serial and ten numeric values: exposure,
++        contrast, gamma, saturation, shadows, red/green/blue gains, SDR white
++        in nits and hue in degrees. Matching profiles override the older
++        sdr-hdr-corrections pair. Native HDR content is never graded.
++      </description>
++    </key>
++
+     <child name="keybindings" schema="org.gnome.mutter.keybindings"/>
+ 
+   </schema>
+diff --git a/src/backends/meta-color-device.c b/src/backends/meta-color-device.c
+index 2b452b0..de0f6d3 100644
+--- a/src/backends/meta-color-device.c
++++ b/src/backends/meta-color-device.c
+@@ -799,6 +799,40 @@ update_color_state (MetaColorDevice *color_device)
+             clutter_color_state_params_set_sdr_correction (color_state, gamma, saturation);
+             break;
+           }
++
++      g_autoptr (GVariant) grading =
++        g_settings_get_value (color_device->sdr_correction_settings, "sdr-hdr-grading");
++      for (gsize i = 0; i < g_variant_n_children (grading); i++)
++        {
++          g_autoptr (GVariant) entry = g_variant_get_child_value (grading, i);
++          g_autoptr (GVariant) values = NULL;
++          const double *data;
++          gsize count;
++          float profile[10];
++          static const double lower[10] = { -2, .5, .5, 0, -.2, .5, .5, .5, 80, -45 };
++          static const double upper[10] = { 2, 2, 2, 2, .2, 1.5, 1.5, 1.5, 400, 45 };
++          gboolean valid = TRUE;
++
++          g_variant_get (entry, "(&s&s&s&s@ad)", &connector, &vendor, &product, &serial, &values);
++          if (g_strcmp0 (connector, spec->connector) != 0 ||
++              g_strcmp0 (vendor, spec->vendor) != 0 ||
++              g_strcmp0 (product, spec->product) != 0 ||
++              g_strcmp0 (serial, spec->serial) != 0)
++            continue;
++          data = g_variant_get_fixed_array (values, &count, sizeof (double));
++          if (count != 10)
++            continue;
++          for (int j = 0; j < 10; j++)
++            {
++              valid &= isfinite (data[j]) && data[j] >= lower[j] && data[j] <= upper[j];
++              profile[j] = (float) data[j];
++            }
++          if (valid)
++            {
++              clutter_color_state_params_set_sdr_grading (color_state, profile);
++              break;
++            }
++        }
+     }
+ 
+   if (!color_device->color_state ||
+@@ -832,6 +866,10 @@ meta_color_device_new (MetaColorManager *color_manager,
+                            "changed::sdr-hdr-corrections",
+                            G_CALLBACK (meta_color_device_update), color_device,
+                            G_CONNECT_SWAPPED);
++  g_signal_connect_object (color_device->sdr_correction_settings,
++                           "changed::sdr-hdr-grading",
++                           G_CALLBACK (meta_color_device_update), color_device,
++                           G_CONNECT_SWAPPED);
+   update_color_state (color_device);
+ 
+   if (meta_monitor_is_virtual (monitor))

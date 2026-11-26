@@ -1,0 +1,94 @@
+diff --git a/src/tests/clutter/conform/color-state-transform.c b/src/tests/clutter/conform/color-state-transform.c
+index b1e0d0b..0934836 100644
+--- a/src/tests/clutter/conform/color-state-transform.c
++++ b/src/tests/clutter/conform/color-state-transform.c
+@@ -495,7 +495,7 @@ color_state_transform_sdr_correction (void)
+ }
+ 
+ static void
+-color_state_transform_correction_hdr_bypass (void)
++check_correction_hdr_bypass (gboolean advanced)
+ {
+   ClutterContext *context = clutter_test_get_context ();
+   g_autoptr (ClutterColorState) plain =
+@@ -512,7 +512,11 @@ color_state_transform_correction_hdr_bypass (void)
+   float gray[] = { 0.5f, 0.5f, 0.5f };
+   float neutral_gray[] = { 0.5f, 0.5f, 0.5f };
+ 
+-  clutter_color_state_params_set_sdr_correction (corrected, 1.4f, 1.3f);
++  const float saved_profile[10] = { 0, 1.1f, .95f, 1.05f, .02f, 1, 1, 1, 204.44f, -1 };
++  if (advanced)
++    clutter_color_state_params_set_sdr_grading (corrected, saved_profile);
++  else
++    clutter_color_state_params_set_sdr_correction (corrected, 1.4f, 1.3f);
+   g_assert_false (clutter_color_state_equals (plain, corrected));
+   /* Correction alone must not disqualify otherwise identical HDR scanout. */
+   g_assert_false (clutter_color_state_needs_mapping (plain, corrected));
+@@ -583,10 +587,66 @@ color_state_transform_correction_hdr_bypass (void)
+     }
+   g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
+   /* Confirm the correction actually changes SDR, rather than bypassing all. */
+-  g_assert_cmpfloat (gray[0], <, neutral_gray[0] - 0.01f);
++  if (advanced)
++    g_assert_cmpfloat (fabsf (gray[0] - neutral_gray[0]), >, 0.0001f);
++  else
++    g_assert_cmpfloat (gray[0], <, neutral_gray[0] - 0.01f);
++}
++
++static void
++color_state_transform_correction_hdr_bypass (void)
++{
++  check_correction_hdr_bypass (FALSE);
++}
++
++static void
++color_state_transform_grading_hdr_bypass (void)
++{
++  check_correction_hdr_bypass (TRUE);
++}
++
++static void
++color_state_transform_sdr_grading (void)
++{
++  ClutterContext *context = clutter_test_get_context ();
++  ClutterActor *stage = clutter_test_get_stage ();
++  ClutterStageView *view = get_stage_view (stage);
++  g_autoptr (ClutterColorState) source =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_SRGB,
++                                    CLUTTER_TRANSFER_FUNCTION_GAMMA22);
++  const float profiles[][10] = {
++    { 0, 1, 1, 1, 0, 1, 1, 1, 203, 0 },
++    { 0, 1.1f, .95f, 1.05f, .02f, 1, 1, 1, 204.44f, -1 },
++    { -.2f, 1.15f, 1.1f, .8f, .01f, .95f, 1.1f, 1.05f, 190, 12 },
++    { 0, 1, 1, 1, 0, 1, 1, 1, 203, 0 },
++  };
++  GList *actors = create_actors (stage);
++  actors_set_color_state (actors, source);
++  for (unsigned int i = 0; i < G_N_ELEMENTS (profiles); i++)
++    {
++      g_autoptr (ClutterColorState) target =
++        clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
++                                        CLUTTER_TRANSFER_FUNCTION_PQ);
++      clutter_color_state_params_set_sdr_grading (target, profiles[i]);
++      stage_view_set_color_state (view, target);
++      clutter_actor_queue_redraw (stage);
++      wait_for_paint (stage);
++      validate_transform (stage, source, clutter_stage_view_get_color_state (view), target);
++      if (i == 1)
++        {
++          /* Independently computed from Color Compare's saved encoded-RGB curve. */
++          float gray[] = { .5f, .5f, .5f };
++          clutter_color_state_do_transform (source, target, gray, 1);
++          for (int c = 0; c < 3; c++)
++            g_assert_cmpfloat_with_epsilon (gray[c], 0.424171f, 0.001f);
++        }
++    }
++  g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
+ }
+ 
+ CLUTTER_TEST_SUITE (
++  CLUTTER_TEST_UNIT ("/color-state-transform/sdr-grading", color_state_transform_sdr_grading)
++  CLUTTER_TEST_UNIT ("/color-state-transform/grading-hdr-bypass", color_state_transform_grading_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/sdr-correction", color_state_transform_sdr_correction)
+   CLUTTER_TEST_UNIT ("/color-state-transform/correction-hdr-bypass", color_state_transform_correction_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/icc-to-params", color_state_transform_icc_to_params)

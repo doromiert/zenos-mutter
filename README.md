@@ -22,6 +22,21 @@ Black and reference white stay fixed. PQ sources, HDR blending buffers,
 ICC-tagged and wide-gamut sources bypass correction. Native HDR scanout is
 not disqualified merely because the output has an SDR correction profile.
 
+The `sdr-hdr-grading` setting extends this with Color Compare appearance profiles.
+Its type is `a(ssssad)`: connector, vendor, product, serial and ten doubles in
+this order: exposure (stops), contrast, gamma, saturation, shadows, red gain,
+green gain, blue gain, SDR white (nits), hue (degrees). A matching profile replaces
+the legacy curve/saturation pair. Inputs are validated against the preview's
+slider ranges. An empty array leaves legacy behavior unchanged.
+
+Grading follows the preview: encoded-sRGB contrast/shadow/gamma adjustment,
+linear RGB exposure/gains and luminance-preserving saturation/hue. Negative
+working-space channels survive until gamut conversion, permitting HDR output
+beyond sRGB. SDR white is independently scaled without changing native HDR.
+Profiles propagate into blending states; mastering headroom prevents repeated
+grading. Native tests cover multiple profiles and neutral transitions,
+independent reference values, CPU/GPU agreement and unchanged HDR pixels.
+
 This is a user-controlled appearance adjustment, not a measured calibration
 or a diagnosis of a monitor/firmware defect. It cannot selectively correct SDR
 UI already merged into a single HDR app surface: applications should use SDR
