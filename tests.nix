@@ -5,7 +5,7 @@ in mutter.overrideAttrs (old: {
   outputs = [ "out" ];
   separateDebugInfo = false;
   dontWrapGApps = true;
-  patches = (old.patches or [ ]) ++ [ ./patches/sdr-hdr-correction-tests.patch ./patches/sdr-hdr-grading-tests.patch ./patches/sdr-hdr-color-mixer-tests.patch ];
+  patches = (old.patches or [ ]) ++ [ ./patches/sdr-hdr-correction-tests.patch ./patches/sdr-hdr-grading-tests.patch ./patches/sdr-hdr-color-mixer-tests.patch ./patches/sdr-hdr-brightness-tests.patch ];
   mesonFlags = builtins.filter (x: x != "-Dtests=disabled" && x != "-Ddocs=true") old.mesonFlags
     ++ [ "-Dtests=enabled" "-Dmutter_tests=false" "-Dcogl_tests=false" "-Ddocs=false" ];
   nativeBuildInputs = old.nativeBuildInputs ++ [ python pkgs.dbus ];

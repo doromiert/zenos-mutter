@@ -1,0 +1,23 @@
+diff --git a/clutter/clutter/clutter-color-state-params.c b/clutter/clutter/clutter-color-state-params.c
+--- a/clutter/clutter/clutter-color-state-params.c
++++ b/clutter/clutter/clutter-color-state-params.c
+@@ -2529,7 +2529,7 @@
+     {
+       clutter_color_state_params_set_sdr_grading (blending_state,
+                                                  color_state_params->sdr_grading);
+-      /* The blend space has its own nominal white; keep the output reference. */
++      /* Keep the output EOTF baseline, not the blend space or brightness-adjusted white. */
+       CLUTTER_COLOR_STATE_PARAMS (blending_state)->sdr_grading_reference =
+         color_state_params->sdr_grading_reference;
+     }
+@@ -2867,8 +2867,9 @@
+     g_return_if_fail (isfinite (values[i]) && values[i] >= lower[i] && values[i] <= upper[i]);
+   params = CLUTTER_COLOR_STATE_PARAMS (state);
+   memcpy (params->sdr_grading, values, sizeof params->sdr_grading);
++  /* An adjusted output white here would cancel GNOME's brightness factor. */
+   params->sdr_grading_reference =
+-    clutter_color_state_params_get_luminance (params)->ref;
++    clutter_eotf_get_default_luminance (params->eotf)->ref;
+   params->sdr_grading_enabled = TRUE;
+ }
+ 

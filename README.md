@@ -94,3 +94,18 @@ surfaceless environment on Mutter50.4/GLib2.88.3. New cases check all six bands,
 neutral transitions, CPU/GPU agreement, gray protection, red-versus-yellow
 separation and actual HDR pixel bypass. This is technical verification, not a
 physical monitor calibration or a new AMD-hardware test.
+
+## Desktop brightness and grading
+
+The grading white is relative to the output transfer function's nominal reference
+(PQ203nits), before GNOME's reference-luminance factor. Capturing the already
+brightness-adjusted white in the grading denominator cancelled the slider's
+subsequent luminance mapping. Preserve this nominal baseline through HDR blend
+states (whose own nominal white is80nits). At nominal brightness the accepted
+profile is unchanged; lowering the desktop reference now scales graded SDR.
+Native HDR still bypasses custom grading and retains ordinary Mutter behavior.
+The regression test decodes PQ and checks the accepted +1EV/204.44nit profile at
+reference factors1.0,0.5,0.2,1.0, alongside CPU/GPU pixels and dimmed-HDR bypass.
+All13 native render tests pass in Mesa26.1.8 surfaceless/GLib2.88.3 on Mutter50.4.
+The same named-PQ regression against the prior implementation fails at half
+brightness:408.884nits versus expected204.44nits. Production build also passes.

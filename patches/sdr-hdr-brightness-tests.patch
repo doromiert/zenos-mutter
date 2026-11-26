@@ -1,0 +1,94 @@
+diff --git a/src/tests/clutter/conform/color-state-transform.c b/src/tests/clutter/conform/color-state-transform.c
+--- a/src/tests/clutter/conform/color-state-transform.c
++++ b/src/tests/clutter/conform/color-state-transform.c
+@@ -498,12 +498,15 @@
+ check_correction_hdr_bypass (int advanced)
+ {
+   ClutterContext *context = clutter_test_get_context ();
++  float reference = advanced == 3 ? 101.5f : 203.0f;
+   g_autoptr (ClutterColorState) plain =
+-    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
+-                                    CLUTTER_TRANSFER_FUNCTION_PQ);
++    clutter_color_state_params_new_full (context, CLUTTER_COLORSPACE_BT2020,
++                                         CLUTTER_TRANSFER_FUNCTION_PQ, NULL, -1.0f,
++                                         .005f, 10000, reference, 10000);
+   g_autoptr (ClutterColorState) corrected =
+-    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020,
+-                                    CLUTTER_TRANSFER_FUNCTION_PQ);
++    clutter_color_state_params_new_full (context, CLUTTER_COLORSPACE_BT2020,
++                                         CLUTTER_TRANSFER_FUNCTION_PQ, NULL, -1.0f,
++                                         .005f, 10000, reference, 10000);
+   g_autoptr (ClutterColorState) blend = NULL;
+   g_autoptr (ClutterColorState) plain_blend = NULL;
+   g_autoptr (ClutterColorState) sdr =
+@@ -517,7 +520,7 @@
+     clutter_color_state_params_set_sdr_grading (corrected, saved_profile);
+   else
+     clutter_color_state_params_set_sdr_correction (corrected, 1.4f, 1.3f);
+-  if (advanced == 2)
++  if (advanced >= 2)
+     {
+       float mixer[18];
+       for (int i = 0; i < 18; i++) mixer[i] = i % 3 == 1 ? 1.3f : i % 3 == 0 ? 12 : .1f;
+@@ -717,7 +720,61 @@
+   g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
+ }
+ 
++static float
++pq_test_nits (float encoded)
++{
++  const float m1 = 2610.0f / 16384, m2 = 2523.0f / 32;
++  const float c1 = 3424.0f / 4096, c2 = 2413.0f / 128, c3 = 2392.0f / 128;
++  float p = powf (encoded, 1 / m2);
++  return 10000 * powf (MAX (p - c1, 0) / (c2 - c3 * p), 1 / m1);
++}
++
++static void
++color_state_transform_grading_brightness (void)
++{
++  ClutterContext *context = clutter_test_get_context ();
++  ClutterActor *stage = clutter_test_get_stage ();
++  ClutterStageView *view = get_stage_view (stage);
++  g_autoptr (ClutterColorState) source =
++    clutter_color_state_params_new (context, CLUTTER_COLORSPACE_SRGB,
++                                    CLUTTER_TRANSFER_FUNCTION_GAMMA22);
++  const float accepted[10] = { 1, 1.1f, .95f, 1, .02f, 1, 1, 1, 204.44f, -1 };
++  const float factors[] = { 1, .5f, .2f, 1 };
++  GList *actors = create_actors (stage);
++  actors_set_color_state (actors, source);
++  for (unsigned int i = 0; i < G_N_ELEMENTS (factors); i++)
++    {
++      float mixer[18];
++      float white[3] = { 1, 1, 1 };
++      g_autoptr (ClutterColorState) target =
++        clutter_color_state_params_new_full (context, CLUTTER_COLORSPACE_BT2020,
++                                             CLUTTER_TRANSFER_FUNCTION_PQ, NULL, -1.0f,
++                                             .005f, 10000, 203 * factors[i], 10000);
++      for (int j = 0; j < 18; j++) mixer[j] = j % 3 == 1 ? 1 : 0;
++      mixer[1] = 1.12f;
++      clutter_color_state_params_set_sdr_grading (target, accepted);
++      clutter_color_state_params_set_sdr_mixer (target, mixer);
++      stage_view_set_color_state (view, target);
++      clutter_actor_queue_redraw (stage);
++      wait_for_paint (stage);
++      validate_transform (stage, source, clutter_stage_view_get_color_state (view), target);
++      clutter_color_state_do_transform (source, target, white, 1);
++      /* +1 EV and a 204.44-nit white must follow the desktop brightness factor. */
++      for (int c = 0; c < 3; c++)
++        g_assert_cmpfloat_with_epsilon (pq_test_nits (white[c]), 408.88f * factors[i], .5f);
++    }
++  g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
++}
++
++static void
++color_state_transform_dimmed_hdr_bypass (void)
++{
++  check_correction_hdr_bypass (3);
++}
++
+ CLUTTER_TEST_SUITE (
++  CLUTTER_TEST_UNIT ("/color-state-transform/grading-brightness", color_state_transform_grading_brightness)
++  CLUTTER_TEST_UNIT ("/color-state-transform/dimmed-hdr-bypass", color_state_transform_dimmed_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/sdr-mixer", color_state_transform_sdr_mixer)
+   CLUTTER_TEST_UNIT ("/color-state-transform/mixer-hdr-bypass", color_state_transform_mixer_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/sdr-grading", color_state_transform_sdr_grading)
