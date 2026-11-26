@@ -1,0 +1,70 @@
+diff --git a/clutter/clutter/clutter-stage-view.c b/clutter/clutter/clutter-stage-view.c
+--- a/clutter/clutter/clutter-stage-view.c
++++ b/clutter/clutter/clutter-stage-view.c
+@@ -75,6 +75,7 @@
+   ClutterColorState *output_color_state;
+ 
+   guint ensure_offscreen_idle_id;
++  ClutterEncodingRequiredFormat offscreen_required_format;
+   CoglOffscreen *offscreen;
+   CoglPipeline *offscreen_pipeline;
+ 
+@@ -230,6 +231,7 @@
+     g_error ("Failed to allocate back buffer texture: %s", local_error->message);
+ 
+   g_set_object (&priv->offscreen, offscreen);
++  priv->offscreen_required_format = required_format;
+ }
+ 
+ static void
+@@ -284,6 +286,40 @@
+   return G_SOURCE_REMOVE;
+ }
+ 
++/* Color uniforms can change without changing the render target allocation. */
++static gboolean
++stage_view_offscreen_is_compatible (ClutterStageView *view)
++{
++  ClutterStageViewPrivate *priv =
++    clutter_stage_view_get_instance_private (view);
++  ClutterEncodingRequiredFormat required_format;
++  CoglFramebuffer *offscreen;
++  int width, height;
++
++  if (!priv->offscreen)
++    return FALSE;
++
++  offscreen = COGL_FRAMEBUFFER (priv->offscreen);
++  required_format = clutter_color_state_required_format (priv->color_state);
++  if (required_format != priv->offscreen_required_format)
++    return FALSE;
++  if (required_format <= CLUTTER_ENCODING_REQUIRED_FORMAT_UINT8 &&
++      cogl_framebuffer_get_internal_format (offscreen) !=
++      cogl_framebuffer_get_internal_format (priv->framebuffer))
++    return FALSE;
++
++  width = cogl_framebuffer_get_width (priv->framebuffer);
++  height = cogl_framebuffer_get_height (priv->framebuffer);
++  if (mtk_monitor_transform_is_rotated (priv->transform))
++    {
++      int tmp = width;
++      width = height;
++      height = tmp;
++    }
++  return cogl_framebuffer_get_width (offscreen) == width &&
++         cogl_framebuffer_get_height (offscreen) == height;
++}
++
+ static void
+ clutter_stage_view_invalidate_offscreen (ClutterStageView *view)
+ {
+@@ -307,7 +343,8 @@
+     }
+ 
+   g_clear_object (&priv->offscreen_pipeline);
+-  g_clear_object (&priv->offscreen);
++  if (!stage_view_offscreen_is_compatible (view))
++    g_clear_object (&priv->offscreen);
+ 
+   if (priv->ensure_offscreen_idle_id != 0)
+     return;

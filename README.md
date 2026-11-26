@@ -131,3 +131,25 @@ invalid inputs. All15 native Clutter transform tests pass on Mutter50.4 with
 Mesa26.1.8/GLib2.88.3: source white1..1000 (plus accepted exposure) matches PQ
 reference and CPU/GPU rendering; real HDR blend/output pixels are unchanged.
 This is software verification, not measured monitor calibration.
+
+
+## Brightness backbuffer reuse
+
+Mutter50.4 discards its stage-view offscreen framebuffer whenever the color
+state changes, including a ref-white brightness adjustment. A live Mesa26.1.8 /
+AMDGPU trace on kernel6.18.48 showed198–296ms main-thread buffer allocations from
+`on_ensure_offscreen_idle -> cogl_offscreen_new_from_formats -> amdgpu_bo_alloc`.
+Repeated updates were associated with high VRAM/GTT residency. This allocation
+path is upstream of the optional grading math and affects ungraded outputs too.
+
+The stage view now reuses an existing buffer when its encoding requirement,
+size, rotation-adjusted geometry and relevant onscreen format are compatible.
+Color pipelines/uniforms still refresh and the view receives a full redraw.
+Mapping removal still releases the offscreen; incompatible geometry/format still
+allocates a replacement. There is no added buffer, polling or delayed brightness.
+
+The native brightness test holds a framebuffer reference and asserts identity
+across all eight curve transitions, alongside PQ values and CPU/GPU agreement.
+All15 native rendering cases pass in Mesa26.1.8 surfaceless. Live desktop latency
+and memory relief require loading the new compositor and are not inferred from
+these software tests.

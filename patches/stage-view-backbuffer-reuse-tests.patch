@@ -1,0 +1,22 @@
+diff --git a/src/tests/clutter/conform/color-state-transform.c b/src/tests/clutter/conform/color-state-transform.c
+--- a/src/tests/clutter/conform/color-state-transform.c
++++ b/src/tests/clutter/conform/color-state-transform.c
+@@ -786,6 +786,7 @@
+   const float whites[] = { 1, 40, 100, 203, 400, 1000, 100, 1 };
+   const float profile[10] = { 1, 1.1f, .95f, 1, .02f, 1, 1, 1, 204.44f, -1 };
+   GList *actors = create_actors (stage);
++  g_autoptr (CoglFramebuffer) reused = NULL;
+   actors_set_color_state (actors, source);
+   for (unsigned int i = 0; i < G_N_ELEMENTS (whites); i++)
+     {
+@@ -798,6 +799,10 @@
+       stage_view_set_color_state (view, target);
+       clutter_actor_queue_redraw (stage);
+       wait_for_paint (stage);
++      if (reused)
++        g_assert_true (clutter_stage_view_get_framebuffer (view) == reused);
++      else
++        reused = g_object_ref (clutter_stage_view_get_framebuffer (view));
+       validate_transform (stage, source, clutter_stage_view_get_color_state (view), target);
+       clutter_color_state_do_transform (source, target, white, 1);
+       for (int c = 0; c < 3; c++)
