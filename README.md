@@ -17,10 +17,11 @@ is applied only in HDR output mode. Changes update live, without restarting
 apps or changing the output HDR mode.
 
 Correction happens in linear source RGB before luminance/gamut conversion.
-Only parameterized sRGB SDR sources without mastering headroom are affected.
-Black and reference white stay fixed. PQ sources, HDR blending buffers,
-ICC-tagged and wide-gamut sources bypass correction. Native HDR scanout is
-not disqualified merely because the output has an SDR correction profile.
+The appearance profile affects parameterized sRGB SDR sources without mastering
+headroom. Parameterized wide-gamut SDR follows the same white/exposure scale,
+while retaining its gamut and bypassing the sRGB appearance/mixer math. Black
+stays fixed. PQ sources, HDR blending buffers and ICC-tagged sources bypass
+correction. Native HDR scanout is not disqualified merely because the output has an SDR correction profile.
 
 The `sdr-hdr-grading` setting extends this with Color Compare appearance profiles.
 Its type is `a(ssssad)`: connector, vendor, product, serial and ten doubles in
@@ -153,3 +154,20 @@ across all eight curve transitions, alongside PQ values and CPU/GPU agreement.
 All15 native rendering cases pass in Mesa26.1.8 surfaceless. Live desktop latency
 and memory relief require loading the new compositor and are not inferred from
 these software tests.
+
+## Wide-gamut SDR reference white
+
+Display P3 and BT2020 SDR buffers now follow the configured SDR white and
+exposure, including the brightness-slider curve. They previously bypassed all
+adjustment, making a pure P3 canvas much brighter than neighboring sRGB UI and
+GTK-rendered clipped edges. The adjustment is a scalar in linear light, before
+gamut conversion; it adds no clipping, render pass or extra buffer. Appearance
+contrast/gamma/hue/mixer controls remain specific to sRGB, and native HDR and
+ICC behavior is unchanged.
+
+The regression compares P3/BT2020 white against independent 1–1000 nit targets
+with exposure, rendered CPU/GPU common-gamut colors, and saturated CPU color
+ratios. Extreme P3 primary conversion through Mutter's existing sRGB blend
+buffer is outside this brightness fix; it is not asserted to match a direct
+color conversion. An isolated GNOME Shell fixture additionally compares a
+real Gnosis P3-only page, its clipped bottom, and an independent sRGB white.

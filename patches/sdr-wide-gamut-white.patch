@@ -1,0 +1,67 @@
+--- a/clutter/clutter/clutter-color-state-params.c
++++ b/clutter/clutter/clutter-color-state-params.c
+@@ -619,12 +619,30 @@
+          !(source->eotf.type == CLUTTER_EOTF_TYPE_NAMED &&
+            source->eotf.tf_name == CLUTTER_TRANSFER_FUNCTION_PQ) &&
+          lum->mastering_max <= lum->ref * 1.01f &&
+-         colorimetry_equal (&source->colorimetry, &srgb);
++         (colorimetry_equal (&source->colorimetry, &srgb) ||
++          target->sdr_grading_enabled);
++}
++
++/* SDR white/exposure is independent of gamut. Keep the sRGB appearance profile
++ * out of wide-gamut RGB so neutral P3 colors retain their full gamut. */
++static float
++sdr_white_only_scale (ClutterColorStateParams *source,
++                       ClutterColorStateParams *target)
++{
++  ClutterColorimetry srgb = { .type = CLUTTER_COLORIMETRY_TYPE_COLORSPACE,
++                             .colorspace = CLUTTER_COLORSPACE_SRGB };
++
++  if (!target->sdr_grading_enabled ||
++      colorimetry_equal (&source->colorimetry, &srgb))
++    return 0;
++  return exp2f (target->sdr_grading[0]) * target->sdr_grading[8] /
++         target->sdr_grading_reference;
+ }
+ 
+ static const ClutterColorOpSnippet sdr_correction = {
+   .name = "sdr_correction",
+   .source =
++    "uniform float sdr_white_only;\n"
+     "uniform float sdr_gamma;\n"
+     "uniform float sdr_saturation;\n"
+     "uniform float sdr_grading_enabled;\n"
+@@ -690,6 +708,7 @@
+     "  return color * sdr_grading[8];\n"
+     "}\n"
+     "vec3 sdr_correction (vec3 color) {\n"
++    "  if (sdr_white_only > 0.0) return color * sdr_white_only;\n"
+     "  vec3 original = color;\n"
+     "  if (sdr_grading_enabled > 0.5) return sdr_mix (sdr_grade (color), original);\n"
+     "  color = pow (max (color, vec3 (0.0)), vec3 (sdr_gamma));\n"
+@@ -1919,6 +1938,9 @@
+ 
+   if (needs_sdr_correction (color_state_params, target_color_state_params))
+     {
++      cogl_pipeline_set_uniform_1f (pipeline,
++        cogl_pipeline_get_uniform_location (pipeline, "sdr_white_only"),
++        sdr_white_only_scale (color_state_params, target_color_state_params));
+       int gamma_location = cogl_pipeline_get_uniform_location (pipeline, "sdr_gamma");
+       int saturation_location = cogl_pipeline_get_uniform_location (pipeline, "sdr_saturation");
+       cogl_pipeline_set_uniform_1f (pipeline, gamma_location, target_color_state_params->sdr_gamma);
+@@ -2255,6 +2277,14 @@
+ {
+   graphene_matrix_t from_xyz, to_xyz;
+   int i, channel;
++  float white_scale = sdr_white_only_scale (source, target);
++
++  if (white_scale > 0)
++    {
++      for (i = 0; i < n_samples * 3; i++)
++        data[i] *= white_scale;
++      return;
++    }
+ 
+   clutter_color_state_params_get_from_XYZ (source, &from_xyz);
+   clutter_color_state_params_get_to_XYZ (source, &to_xyz);

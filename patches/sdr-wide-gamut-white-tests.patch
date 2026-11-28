@@ -1,0 +1,64 @@
+--- a/src/tests/clutter/conform/color-state-transform.c
++++ b/src/tests/clutter/conform/color-state-transform.c
+@@ -817,7 +817,61 @@
+   check_correction_hdr_bypass (4);
+ }
+ 
++/* SDR white/exposure follows the slider in P3/BT2020 without clipping gamut. */
++static void
++color_state_transform_wide_sdr_white (void)
++{
++  ClutterContext *context = clutter_test_get_context ();
++  ClutterActor *stage = clutter_test_get_stage ();
++  ClutterStageView *view = get_stage_view (stage);
++  const float whites[] = { 1, 40, 203, 400, 1000, 40 };
++  const float profile[10] = { 1, 1.1f, .95f, 1.2f, .02f, 1, 1, 1, 204.44f, 12 };
++  const ClutterColorspace gamuts[] = { CLUTTER_COLORSPACE_P3, CLUTTER_COLORSPACE_BT2020 };
++
++  for (unsigned g = 0; g < G_N_ELEMENTS (gamuts); g++)
++    {
++      g_autoptr (ClutterColorState) source =
++        clutter_color_state_params_new (context, gamuts[g], CLUTTER_TRANSFER_FUNCTION_GAMMA22);
++      g_autoptr (ClutterColorState) plain =
++        clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020, CLUTTER_TRANSFER_FUNCTION_PQ);
++      float reference[3] = { 1, .2f, .05f };
++      GList *actors = create_actors (stage);
++      actors_set_color_state (actors, source);
++      clutter_color_state_do_transform (source, plain, reference, 1);
++      for (unsigned i = 0; i < G_N_ELEMENTS (whites); i++)
++        {
++          float white[3] = { 1, 1, 1 }, saturated[3] = { 1, .2f, .05f };
++          g_autoptr (ClutterColorState) target =
++            clutter_color_state_params_new (context, CLUTTER_COLORSPACE_BT2020, CLUTTER_TRANSFER_FUNCTION_PQ);
++          clutter_color_state_params_set_sdr_grading (target, profile);
++          clutter_color_state_params_set_sdr_white (target, whites[i]);
++          stage_view_set_color_state (view, target);
++          clutter_actor_queue_redraw (stage);
++          wait_for_paint (stage);
++          /* Extreme P3 primaries exercise separate upstream blend-gamut behavior;
++           * compare common-gamut RGB and absolute white through this render path. */
++          for (int sample = 4; sample <= 6; sample++)
++            {
++              float rgb[3] = { test_colors[sample].r, test_colors[sample].g, test_colors[sample].b };
++              clutter_color_state_do_transform (source, target, rgb, 1);
++              g_assert_true (validate_one_transform (clutter_stage_view_get_onscreen (view),
++                sample * ACTOR_SIZE, rgb, test_colors + sample, "wide SDR -> output"));
++            }
++          clutter_color_state_do_transform (source, target, white, 1);
++          clutter_color_state_do_transform (source, target, saturated, 1);
++          for (int c = 0; c < 3; c++)
++            {
++              g_assert_cmpfloat_with_epsilon (pq_test_nits (white[c]), 2 * whites[i], 2);
++              g_assert_cmpfloat_with_epsilon (pq_test_nits (saturated[c]),
++                pq_test_nits (reference[c]) * 2 * whites[i] / 203, 2);
++            }
++        }
++      g_list_free_full (actors, (GDestroyNotify) clutter_actor_destroy);
++    }
++}
++
+ CLUTTER_TEST_SUITE (
++  CLUTTER_TEST_UNIT ("/color-state-transform/wide-sdr-white", color_state_transform_wide_sdr_white)
+   CLUTTER_TEST_UNIT ("/color-state-transform/sdr-slider-curve", color_state_transform_sdr_slider_curve)
+   CLUTTER_TEST_UNIT ("/color-state-transform/curve-hdr-bypass", color_state_transform_curve_hdr_bypass)
+   CLUTTER_TEST_UNIT ("/color-state-transform/grading-brightness", color_state_transform_grading_brightness)
